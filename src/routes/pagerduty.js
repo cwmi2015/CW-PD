@@ -184,54 +184,54 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
       log(`✅ Updated ConnectWise Ticket #${ticketId}`);
     }
 
-   // --- Add resolution note if resolved ---
-if (eventType === "incident.resolved") {
-  let resolutionNote = "Resolved in PagerDuty";
+    // --- Add resolution note if resolved ---
+    if (eventType === "incident.resolved") {
+      let resolutionNote = "Resolved in PagerDuty";
 
-  try {
-    // Fetch latest PagerDuty notes for the incident
-    const notesRes = await axios.get(
-      `https://api.pagerduty.com/incidents/${incident.id}/notes`,
-      {
-        headers: {
-          Authorization: `Token token=${process.env.PD_API_KEY}`,
-          Accept: "application/vnd.pagerduty+json;version=2",
-          "Content-Type": "application/json",
-        },
+      try {
+        // Fetch latest PagerDuty notes for the incident
+        const notesRes = await axios.get(
+          `https://api.pagerduty.com/incidents/${incident.id}/notes`,
+          {
+            headers: {
+              Authorization: `Token token=${process.env.PD_API_KEY}`,
+              Accept: "application/vnd.pagerduty+json;version=2",
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        const notes = notesRes.data?.notes || [];
+
+        if (notes.length > 0) {
+          // Find note that starts with "Resolution Note:"
+          const resolutionEntry = notes.find(note =>
+            note.content?.trim().startsWith("Resolution Note:")
+          );
+
+          if (resolutionEntry) {
+            // Clean it up to remove the prefix
+            resolutionNote = resolutionEntry.content
+              .replace(/^Resolution Note:\s*/i, "")
+              .trim();
+            log(`✅ Found Resolution Note in PagerDuty: ${resolutionNote}`);
+          } else {
+            // If no "Resolution Note:" found, use the latest note as fallback
+            const latestNote = notes[notes.length - 1].content?.trim();
+            resolutionNote = latestNote || resolutionNote;
+            log("⚠️ No 'Resolution Note:' found — using latest note instead.");
+          }
+        } else {
+          log("⚠️ No notes found for PagerDuty incident — using fallback text.");
+        }
+      } catch (err) {
+        log(`❌ Error fetching PagerDuty notes: ${err.message}`);
       }
-    );
 
-    const notes = notesRes.data?.notes || [];
-
-    if (notes.length > 0) {
-      // Find note that starts with "Resolution Note:"
-      const resolutionEntry = notes.find(note =>
-        note.content?.trim().startsWith("Resolution Note:")
-      );
-
-      if (resolutionEntry) {
-        // Clean it up to remove the prefix
-        resolutionNote = resolutionEntry.content
-          .replace(/^Resolution Note:\s*/i, "")
-          .trim();
-        log(`✅ Found Resolution Note in PagerDuty: ${resolutionNote}`);
-      } else {
-        // If no "Resolution Note:" found, use the latest note as fallback
-        const latestNote = notes[notes.length - 1].content?.trim();
-        resolutionNote = latestNote || resolutionNote;
-        log("⚠️ No 'Resolution Note:' found — using latest note instead.");
-      }
-    } else {
-      log("⚠️ No notes found for PagerDuty incident — using fallback text.");
+      // Save only one resolution note to ConnectWise
+      await addTicketNote(ticketId, resolutionNote, "Resolution");
+      log(`📝 Added resolution note to ConnectWise Ticket #${ticketId}: ${resolutionNote}`);
     }
-  } catch (err) {
-    log(`❌ Error fetching PagerDuty notes: ${err.message}`);
-  }
-
-  // Save only one resolution note to ConnectWise
-  await addTicketNote(ticketId, resolutionNote, "Resolution");
-  log(`📝 Added resolution note to ConnectWise Ticket #${ticketId}: ${resolutionNote}`);
-}
 
     res.status(200).json({ message: "PagerDuty v3 webhook processed successfully" });
   } catch (err) {

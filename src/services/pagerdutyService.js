@@ -12,7 +12,7 @@ const pdHeaders = {
 };
 
 // ----------------------------------------------
-// ✅ Create a new PagerDuty incident
+// Create a new PagerDuty incident
 // ----------------------------------------------
 exports.createIncident = async (ticket) => {
   try {

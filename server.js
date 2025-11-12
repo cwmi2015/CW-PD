@@ -29,10 +29,28 @@ app.use(morgan("dev"));
 app.use("/connectwise", connectwiseRoutes);
 app.use("/pagerduty", pagerdutyRoutes);
 
-// Health check
-app.get("/", (req, res) =>
-  res.send("✅ ConnectWise ↔ PagerDuty Integration Running (Webhook V3)")
-);
+// 👇 Root route (homepage)
+app.get("/", (req, res) => {
+  res.send(`
+    <html>
+      <head>
+        <title>Manage ConnectWise & PagerDuty APIs</title>
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            background-color: #f9fafb;
+          }
+          h1 {
+            color: black;
+          }
+        </style>
+      </head>
+      <body>
+        <h1>Welcome to Manage ConnectWise and PagerDuty APIs portal</h1>
+      </body>
+    </html>
+  `);
+});
 
 // Start server
 const PORT = process.env.PORT || 3000;
