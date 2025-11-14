@@ -26,11 +26,48 @@ exports.createIncident = async (ticket) => {
   try {
     let serviceId;
 
-    if (ticket.board?.name === "Technical Support") serviceId = process.env.PD_SERVICE_TS;
-    else if (ticket.board?.name === "Security Operations Center") serviceId = process.env.PD_SERVICE_SOC;
-    else if (ticket.board?.name === "Alerts") serviceId = process.env.PD_SERVICE_NOC;
-    else throw new Error(`Ticket board "${ticket.board?.name}" is not mapped`);
+    // --------------------------
+    // Board → PagerDuty Service Mapping
+    // --------------------------
+    if (ticket.board?.name === "Technical Support") {
 
+      // 🔍 NEW CONDITION ADDED
+      const summary = ticket.summary || "";
+
+      const allowedKeywords = [
+        "via Critical",
+        "via Non Critical",
+        "via Technical Support",
+      ];
+
+      // Case-insensitive match for any keyword
+      const containsAllowed = allowedKeywords.some((kw) => {
+        const regex = new RegExp(kw, "i"); // 'i' = ignore case
+        return regex.test(summary);
+      });
+
+      if (!containsAllowed) {
+        log(
+          `⏩ Skipped incident creation for Ticket #${ticket.id} — summary does not contain allowed keywords for Technical Support board`
+        );
+        return null;
+      }
+      
+      serviceId = process.env.PD_SERVICE_TS;
+    }
+    else if (ticket.board?.name === "Security Operations Center") {
+      serviceId = process.env.PD_SERVICE_SOC;
+    }
+    else if (ticket.board?.name === "Alerts") {
+      serviceId = process.env.PD_SERVICE_NOC;
+    }
+    else {
+      throw new Error(`Ticket board "${ticket.board?.name}" is not mapped`);
+    }
+
+    // --------------------------
+    // Priority Mapping
+    // --------------------------
     const priorityName = (ticket.priority?.name || "").toLowerCase();
     let priorityId = process.env.PD_PRIORITY_P5;
     let urgency = "low";
@@ -54,9 +91,12 @@ exports.createIncident = async (ticket) => {
       priorityCode = "P4";
     }
 
-    const summary = (ticket.summary || "No summary").replace(/\s+/g, " ").trim();
-    const title = `${priorityCode} | #${ticket.id} - ${summary}`;
+    const summaryClean = (ticket.summary || "No summary").replace(/\s+/g, " ").trim();
+    const title = `${priorityCode} | #${ticket.id} - ${summaryClean}`;
 
+    // --------------------------
+    // Create Incident Payload
+    // --------------------------
     const payload = {
       incident: {
         type: "incident",
@@ -72,6 +112,9 @@ exports.createIncident = async (ticket) => {
       },
     };
 
+    // --------------------------
+    // Create Incident in PD
+    // --------------------------
     const res = await axios.post(`${PD_API_URL}/incidents`, payload, {
       headers: pdHeaders,
     });
@@ -79,19 +122,21 @@ exports.createIncident = async (ticket) => {
     const incident = res.data?.incident;
     if (!incident) throw new Error("PagerDuty did not return incident object");
 
-    log(`Created PagerDuty incident ${incident.id}`);
+    log(`🆕 Created PagerDuty incident ${incident.id}`);
 
+    // Add description as a PD note
     if (ticket.description) {
       await axios.post(
         `${PD_API_URL}/incidents/${incident.id}/notes`,
         { note: { content: ticket.description } },
-        { headers: { ...pdHeaders } }
+        { headers: pdHeaders }
       );
     }
 
     return incident;
+
   } catch (err) {
-    error("Failed to create PagerDuty incident", err.response?.data || err.message);
+    error("❌ Failed to create PagerDuty incident", err.response?.data || err.message);
     throw err;
   }
 };
@@ -104,11 +149,11 @@ exports.updateIncident = async (incidentId, status) => {
     };
 
     const res = await axios.put(`${PD_API_URL}/incidents/${incidentId}`, payload, {
-  headers: { 
-    ...pdHeaders,
-    From: process.env.PD_USER_EMAIL,
-  },
-});
+      headers: {
+        ...pdHeaders,
+        From: process.env.PD_USER_EMAIL,
+      },
+    });
 
 
     log(`🔄 Updated PagerDuty incident ${incidentId} → ${status}`);

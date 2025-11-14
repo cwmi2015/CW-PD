@@ -124,6 +124,7 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
     // --- Map PagerDuty → CW Status ---
     let statusUpdate = null;
     if (eventType === "incident.resolved") statusUpdate = "Returned To Normal";
+    if (eventType === "incident.acknowledged") statusUpdate = "Acknowledged";
 
     // --- Map PD Priority → CW Priority ---
     let priorityUpdate = null;
