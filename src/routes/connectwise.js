@@ -32,7 +32,7 @@ router.get("/sync-ticket/:id", async (req, res) => {
   try {
     // Step 1️⃣: Fetch ticket from ConnectWise
     const cwResponse = await axios.get(
-      `${CW_URL}/v4_6_release/apis/3.0/service/tickets/${ticketId}`,
+      `https://na.myconnectwise.net/v2025_1/apis/3.0/service/tickets/${ticketId}`,
       { headers: baseHeaders }
     );
     const ticket = cwResponse.data;
@@ -74,9 +74,7 @@ router.get("/sync-ticket/:id", async (req, res) => {
   }
 });
 
-// -------------------------------------------
-// Route: ConnectWise Webhook → PagerDuty Incident
-// -------------------------------------------
+// ---- CONNECTWISE Webhook Handler -----
 router.post("/webhook", async (req, res) => {
   try {
     log("📩 CW Webhook Received:", JSON.stringify(req.body, null, 2));

@@ -28,7 +28,7 @@ function verifyPagerDutySignature(req, secret) {
   }
 }
 
-// --- Webhook Handler ---
+// --- PAGERDUTY Webhook Handler ---
 router.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   try {
     const rawBody = req.body;

@@ -59,7 +59,7 @@ exports.createTicket = async (data) => {
     };
 
     const res = await axios.post(
-      `${CW_URL}/v4_6_release/apis/3.0/service/tickets`,
+      `https://na.myconnectwise.net/v2025_1/apis/3.0/service/tickets`,
       payload,
       { headers: baseHeaders }
     );
@@ -79,7 +79,7 @@ exports.createTicket = async (data) => {
 exports.updateTicket = async (ticketId, updates) => {
   try {
     const res = await axios.patch(
-      `${CW_URL}/v4_6_release/apis/3.0/service/tickets/${ticketId}`,
+      `https://na.myconnectwise.net/v2025_1/apis/3.0/service/tickets/${ticketId}`,
       updates,
       { headers: baseHeaders }
     );
@@ -134,7 +134,7 @@ exports.addTicketNote = async (ticketId, text, type = "Resolution") => {
 // ----------------------
 exports.getTicketDescription = async (ticketId) => {
   try {
-    const notesUrl = `${CW_URL}/v4_6_release/apis/3.0/service/tickets/${ticketId}/notes`;
+    const notesUrl = `https://na.myconnectwise.net/v2025_1/apis/3.0/service/tickets/${ticketId}/notes`;
     const res = await axios.get(notesUrl, { headers: baseHeaders });
 
     // Find note with "detailDescriptionFlag" = true → this is the Initial Description
