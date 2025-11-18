@@ -18,9 +18,7 @@ const baseHeaders = {
   clientId: CLIENT_ID,
 };
 
-// ----------------------
 // Helper: Get company by name
-// ----------------------
 async function getCompanyByName(name) {
   try {
     const res = await axios.get(
@@ -34,9 +32,7 @@ async function getCompanyByName(name) {
   }
 }
 
-// ----------------------
 // Create Ticket
-// ----------------------
 exports.createTicket = async (data) => {
   try {
     // 🔹 Find company ID if only name was given
@@ -73,9 +69,7 @@ exports.createTicket = async (data) => {
   }
 };
 
-// ----------------------
 // Update Ticket
-// ----------------------
 exports.updateTicket = async (ticketId, updates) => {
   try {
     const res = await axios.patch(
@@ -108,10 +102,10 @@ exports.addTicketNote = async (ticketId, text, type = "Resolution") => {
     else if (type.toLowerCase() === "internal") payload.internalAnalysisFlag = true;
     else payload.detailDescriptionFlag = true;
 
-    // ✅ Use your working static URL pattern
+    // Use your working static URL pattern
     const url = `https://na.myconnectwise.net/v2025_1/apis/3.0/service/tickets/${ticketId}/notes`;
 
-    // ✅ EXACT headers from your cURL
+    // EXACT headers from your cURL
     const headers = {
       "Authorization": "Basic bGJ0K3pBVTU2Z3N1azJkZW9ORTA6emJHNlNiZXJlcGlKcGpuQw==",
       "Content-Type": "application/json",
@@ -129,9 +123,7 @@ exports.addTicketNote = async (ticketId, text, type = "Resolution") => {
   }
 };
 
-// ----------------------
 // Get Ticket Initial Description
-// ----------------------
 exports.getTicketDescription = async (ticketId) => {
   try {
     const notesUrl = `https://na.myconnectwise.net/v2025_1/apis/3.0/service/tickets/${ticketId}/notes`;

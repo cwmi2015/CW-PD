@@ -19,16 +19,12 @@ if (!PD_API_URL) throw new Error("❌ Missing PD_API_URL");
 if (!process.env.PD_SERVICE_TS) throw new Error("❌ Missing PD_SERVICE_TS");
 if (!process.env.PD_USER_EMAIL) throw new Error("❌ Missing PD_USER_EMAIL");
 
-// ----------------------------------------------
 // Create a new PagerDuty incident
-// ----------------------------------------------
 exports.createIncident = async (ticket) => {
   try {
     let serviceId;
 
-    // --------------------------
     // Board → PagerDuty Service Mapping
-    // --------------------------
     if (ticket.board?.name === "Technical Support") {
 
       // 🔍 NEW CONDITION ADDED
@@ -48,11 +44,11 @@ exports.createIncident = async (ticket) => {
 
       if (!containsAllowed) {
         log(
-          `⏩ Skipped incident creation for Ticket #${ticket.id} — summary does not contain allowed keywords for Technical Support board`
+          `Skipped incident creation for Ticket #${ticket.id} — summary does not contain allowed keywords for Technical Support board`
         );
         return null;
       }
-      
+
       serviceId = process.env.PD_SERVICE_TS;
     }
     else if (ticket.board?.name === "Security Operations Center") {
@@ -65,13 +61,11 @@ exports.createIncident = async (ticket) => {
       throw new Error(`Ticket board "${ticket.board?.name}" is not mapped`);
     }
 
-    // --------------------------
-    // Priority Mapping
-    // --------------------------
+    // Priority Mapping (Only allow P1, P2, P3)
     const priorityName = (ticket.priority?.name || "").toLowerCase();
-    let priorityId = process.env.PD_PRIORITY_P5;
+    let priorityId = null;
     let urgency = "low";
-    let priorityCode = "P5";
+    let priorityCode = null;
 
     if (["1a - emergency", "1b - emergency"].includes(priorityName)) {
       priorityId = process.env.PD_PRIORITY_P1;
@@ -85,18 +79,14 @@ exports.createIncident = async (ticket) => {
       priorityId = process.env.PD_PRIORITY_P3;
       urgency = "high";
       priorityCode = "P3";
-    } else if (["4a - normal", "4b - normal", "4c - normal"].includes(priorityName)) {
-      priorityId = process.env.PD_PRIORITY_P4;
-      urgency = "low";
-      priorityCode = "P4";
+    } else {
+      log(`Ticket #${ticket.id} skipped — priority "${ticket.priority?.name}" is NOT allowed for PagerDuty.`);
+      return null; 
     }
 
     const summaryClean = (ticket.summary || "No summary").replace(/\s+/g, " ").trim();
     const title = `${priorityCode} | #${ticket.id} - ${summaryClean}`;
-
-    // --------------------------
     // Create Incident Payload
-    // --------------------------
     const payload = {
       incident: {
         type: "incident",
@@ -112,9 +102,7 @@ exports.createIncident = async (ticket) => {
       },
     };
 
-    // --------------------------
     // Create Incident in PD
-    // --------------------------
     const res = await axios.post(`${PD_API_URL}/incidents`, payload, {
       headers: pdHeaders,
     });
@@ -122,7 +110,7 @@ exports.createIncident = async (ticket) => {
     const incident = res.data?.incident;
     if (!incident) throw new Error("PagerDuty did not return incident object");
 
-    log(`🆕 Created PagerDuty incident ${incident.id}`);
+    log(`Created PagerDuty incident ${incident.id}`);
 
     // Add description as a PD note
     if (ticket.description) {
@@ -136,7 +124,7 @@ exports.createIncident = async (ticket) => {
     return incident;
 
   } catch (err) {
-    error("❌ Failed to create PagerDuty incident", err.response?.data || err.message);
+    error("Failed to create PagerDuty incident", err.response?.data || err.message);
     throw err;
   }
 };
@@ -156,7 +144,7 @@ exports.updateIncident = async (incidentId, status) => {
     });
 
 
-    log(`🔄 Updated PagerDuty incident ${incidentId} → ${status}`);
+    log(`Updated PagerDuty incident ${incidentId} → ${status}`);
     return res.data.incident;
   } catch (err) {
     const msg = err.response?.data || err.message;

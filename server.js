@@ -29,7 +29,7 @@ app.use(morgan("dev"));
 app.use("/connectwise", connectwiseRoutes);
 app.use("/pagerduty", pagerdutyRoutes);
 
-// 👇 Root route (homepage)
+// Root route (homepage)
 app.get("/", (req, res) => {
   res.send(`
     <html>

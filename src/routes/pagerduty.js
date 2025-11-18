@@ -44,7 +44,7 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
     const eventType = event.event_type;
     const incident = data.incident || data; // handle both cases
 
-    // --- 📝 Handle annotation events (notes added in PagerDuty UI) ---
+    // --- Handle annotation events (notes added in PagerDuty UI) ---
     if (eventType === "incident.annotated") {
       const noteText =
         incident?.event_details?.description ||
@@ -56,9 +56,9 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
 
       if (ticketId) {
         await addTicketNote(ticketId, noteText, "Detail");
-        log(`🗒️ Added PagerDuty annotation to ConnectWise Ticket #${ticketId}: ${noteText}`);
+        log(`Added PagerDuty annotation to ConnectWise Ticket #${ticketId}: ${noteText}`);
       } else {
-        log(`⚠️ Skipped annotation event — no ticket ID found`);
+        log(`Skipped annotation event — no ticket ID found`);
       }
 
       return res.status(200).json({ message: "Annotation handled" });
@@ -79,7 +79,7 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
     log(`Received event from PagerDuty service: ${serviceName} (${serviceId})`);
 
     if (!serviceId) {
-      log(`ℹ️ Skipping PagerDuty event "${eventType}" — no service info (likely annotation or system event)`);
+      log(`Skipping PagerDuty event "${eventType}" — no service info (likely annotation or system event)`);
       return res.status(200).json({ message: "Event skipped (no service info)" });
     }
 
@@ -182,7 +182,7 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
     // --- Apply updates to CW ticket ---
     if (updates.length > 0) {
       await updateTicket(ticketId, updates);
-      log(`✅ Updated ConnectWise Ticket #${ticketId}`);
+      log(`Updated ConnectWise Ticket #${ticketId}`);
     }
 
     // --- Add resolution note if resolved ---
@@ -215,33 +215,31 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
             resolutionNote = resolutionEntry.content
               .replace(/^Resolution Note:\s*/i, "")
               .trim();
-            log(`✅ Found Resolution Note in PagerDuty: ${resolutionNote}`);
+            log(`Found Resolution Note in PagerDuty: ${resolutionNote}`);
           } else {
             // If no "Resolution Note:" found, use the latest note as fallback
             const latestNote = notes[notes.length - 1].content?.trim();
             resolutionNote = latestNote || resolutionNote;
-            log("⚠️ No 'Resolution Note:' found — using latest note instead.");
+            log("No 'Resolution Note:' found — using latest note instead.");
           }
         } else {
-          log("⚠️ No notes found for PagerDuty incident — using fallback text.");
+          log("No notes found for PagerDuty incident — using fallback text.");
         }
       } catch (err) {
-        log(`❌ Error fetching PagerDuty notes: ${err.message}`);
+        log(`Error fetching PagerDuty notes: ${err.message}`);
       }
 
       // Save only one resolution note to ConnectWise
       await addTicketNote(ticketId, resolutionNote, "Resolution");
-      log(`📝 Added resolution note to ConnectWise Ticket #${ticketId}: ${resolutionNote}`);
+      log(`Added resolution note to ConnectWise Ticket #${ticketId}: ${resolutionNote}`);
     }
 
     res.status(200).json({ message: "PagerDuty v3 webhook processed successfully" });
   } catch (err) {
-    error("❌ Error handling PagerDuty webhook:", err);
+    error("Error handling PagerDuty webhook:", err);
     res.status(500).json({ message: "Internal Server Error" });
   }
 });
-
-
 
 // --- Debug route ---
 router.get("/last-event", (req, res) => {

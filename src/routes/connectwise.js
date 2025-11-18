@@ -23,57 +23,6 @@ const baseHeaders = {
   clientId: CLIENT_ID,
 };
 
-// -------------------------------------------
-// Route: Manually sync a CW ticket to PagerDuty
-// -------------------------------------------
-router.get("/sync-ticket/:id", async (req, res) => {
-  const ticketId = req.params.id;
-
-  try {
-    // Step 1️⃣: Fetch ticket from ConnectWise
-    const cwResponse = await axios.get(
-      `https://na.myconnectwise.net/v2025_1/apis/3.0/service/tickets/${ticketId}`,
-      { headers: baseHeaders }
-    );
-    const ticket = cwResponse.data;
-
-    if (!ticket) {
-      return res.status(404).json({ message: `Ticket #${ticketId} not found in ConnectWise` });
-    }
-
-    log(`Fetched ConnectWise Ticket #${ticketId}`);
-
-    // Step 2️⃣: Filter allowed boards
-    if (!allowedBoards.includes(ticket.board?.name)) {
-      log(`Ticket #${ticketId} skipped: board "${ticket.board?.name}" not allowed`);
-      return res.status(200).json({
-        message: `Ticket #${ticketId} skipped: board "${ticket.board?.name}" is not allowed`,
-        ticket,
-      });
-    }
-
-    // Step 3️⃣: Fetch Initial Description from Notes
-    const description = await getTicketDescription(ticket.id);
-    if (description) ticket.description = description;
-
-    // Step 4️⃣: Trigger PagerDuty incident
-    await createIncident(ticket);
-    log(`Triggered PagerDuty incident for Ticket #${ticketId}`);
-
-    res.status(200).json({
-      message: `PagerDuty incident created for ConnectWise Ticket #${ticketId}`,
-      ticket,
-    });
-  } catch (err) {
-    const msg = err.response?.data || err.message;
-    error(`Failed to sync Ticket #${ticketId} to PagerDuty`, msg);
-    res.status(500).json({
-      message: "Error syncing ConnectWise ticket to PagerDuty",
-      error: msg,
-    });
-  }
-});
-
 // ---- CONNECTWISE Webhook Handler -----
 router.post("/webhook", async (req, res) => {
   try {
@@ -130,38 +79,51 @@ router.post("/webhook", async (req, res) => {
     let existingIncident = await getIncidentByKey(incidentKey);
 
     if (!existingIncident) {
-      // If no PD incident exists yet, create one
+      log(`🕵️ No incident found initially for ${incidentKey}. Verifying once more after delay...`);
+
+      // Wait 2 seconds to let PagerDuty register before checking again
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      // Final check to prevent duplicates
+      existingIncident = await getIncidentByKey(incidentKey);
+    }
+
+    if (!existingIncident) {
+      // Still not found → Create a new incident (safe)
       const newIncident = await createIncident(ticket);
       existingIncident = newIncident;
-      log(`🚨 Created PagerDuty incident for new Ticket #${ticket.id}`);
+      log(`Created NEW PagerDuty incident for Ticket #${ticket.id} → Incident ID: ${newIncident.id}`);
     } else {
-      // --- Check PD incident current status ---
-      const pdStatus = existingIncident.status; // usually 'triggered', 'acknowledged', or 'resolved'
-      log(`🔍 Existing PagerDuty incident ${existingIncident.id} status: ${pdStatus}`);
+      // --- Existing PD Incident Found ---
+      const pdStatus = existingIncident.status; // 'triggered', 'acknowledged', 'resolved'
+      log(`🔍 Existing PagerDuty incident found (${existingIncident.id}) with status: ${pdStatus}`);
 
+      // --- CW Ticket Status Handling ---
       if (TRIGGER_STATUSES.includes(status)) {
         if (pdStatus === "resolved") {
-          // PagerDuty won't allow re-opening resolved incidents → create new one
+          // Can't reopen a resolved PD incident → Create a new one
           const newIncident = await createIncident(ticket);
-          log(`🔁 Ticket #${ticket.id} was resolved — created NEW PagerDuty incident ${newIncident.id}`);
+          log(`Existing incident was resolved. Created NEW incident ${newIncident.id}`);
         } else {
-          log(`ℹ️ Ticket #${ticket.id} already active in PagerDuty (status: ${pdStatus})`);
+          log(` Ticket #${ticket.id} already active in PagerDuty (status: ${pdStatus})`);
         }
+
       } else if (RESOLVE_STATUSES.includes(status)) {
         if (pdStatus !== "resolved") {
           await updateIncident(existingIncident.id, "resolved");
-          log(`✅ Ticket #${ticket.id} → PagerDuty status set to RESOLVED`);
+          log(`Ticket #${ticket.id} → PagerDuty status updated to RESOLVED`);
         } else {
-          log(`ℹ️ Ticket #${ticket.id} already resolved in PagerDuty`);
+          log(`Ticket #${ticket.id} already resolved in PagerDuty`);
         }
+
       } else {
-        log(`ℹ️ Ticket #${ticket.id} → CW Status "${status}" has no PD mapping`);
+        log(`Ticket #${ticket.id} → CW Status "${status}" has no PagerDuty mapping`);
       }
     }
 
     res.status(200).json({ message: "CW Webhook processed", status, ticket });
   } catch (err) {
-    error("❌ Error processing CW webhook", err);
+    error(" Error processing CW webhook", err);
     res.status(500).json({ message: "Error creating/updating PagerDuty incident", error: err.message });
   }
 });
