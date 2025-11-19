@@ -156,12 +156,23 @@ exports.updateIncident = async (incidentId, status) => {
 // Get PagerDuty Incident by Key (CW Ticket ID)
 exports.getIncidentByKey = async (incidentKey) => {
   try {
-    const res = await axios.get(`${PD_API_URL}/incidents?incident_key=${incidentKey}`, {
+    // Primary: search by incident key
+    let res = await axios.get(`${PD_API_URL}/incidents?incident_key=${incidentKey}`, {
       headers: pdHeaders,
     });
+
+    if (res.data.incidents?.[0]) return res.data.incidents[0];
+
+    // Fallback: search by title
+    res = await axios.get(`${PD_API_URL}/incidents?query=${incidentKey}`, {
+      headers: pdHeaders,
+    });
+
     return res.data.incidents?.[0] || null;
+
   } catch (err) {
     error(`Failed to fetch incident by key ${incidentKey}`, err.message);
     return null;
   }
 };
+
