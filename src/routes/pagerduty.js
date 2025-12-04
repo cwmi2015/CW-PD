@@ -37,7 +37,7 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
 
     const event = body.event;
     if (!event || !event.data) {
-      return res.status(400).json({ message: "Invalid PagerDuty v3 payload" });
+      return res.status(200).json({ message: "Invalid PagerDuty v3 payload" });
     }
 
     const data = event.data;
@@ -102,13 +102,13 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
       secret = process.env.PD_SECRET_SOC;
     } else {
       error(`Unknown PagerDuty service: ${serviceName} (${serviceId})`);
-      return res.status(400).json({ message: `Unknown service: ${serviceName}` });
+      return res.status(200).json({ message: `Unknown service: ${serviceName}` });
     }
 
     // --- Verify signature ---
     if (!verifyPagerDutySignature(req, secret)) {
       error(`PagerDuty signature verification failed for service: ${serviceName}`);
-      return res.status(400).json({ message: "Invalid signature" });
+      return res.status(200).json({ message: "Invalid signature" });
     }
 
     // --- Extract ConnectWise Ticket ID ---

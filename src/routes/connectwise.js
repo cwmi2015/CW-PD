@@ -35,7 +35,7 @@ router.post("/webhook", async (req, res) => {
     const event = req.body.event || req.body.action || req.body.Action;
 
     if (type !== "ticket") return res.status(200).json({ message: "Ignored non-ticket webhook" });
-    if (!ticket || !ticket.id) return res.status(400).json({ message: "Missing ticket object or ID" });
+    if (!ticket || !ticket.id) return res.status(200).json({ message: "Missing ticket object or ID" });
 
     // --- Check Board Filter ---
     if (!allowedBoards.includes(ticket.board?.name)) {
