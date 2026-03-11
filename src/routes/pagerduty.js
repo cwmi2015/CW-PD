@@ -3,7 +3,7 @@ const crypto = require("crypto");
 const axios = require("axios");
 const router = express.Router();
 const { log, error } = require("../utils/logger");
-const { updateTicket, addTicketNote } = require("../services/connectwiseService");
+const { updateTicket, addTicketNote, getTicket } = require("../services/connectwiseService");
 
 let lastWebhookEvent = null;
 
@@ -123,8 +123,32 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
 
     // --- Map PagerDuty → CW Status ---
     let statusUpdate = null;
-    if (eventType === "incident.resolved") statusUpdate = "Returned To Normal";
-    if (eventType === "incident.acknowledged") statusUpdate = "Acknowledged";
+
+    if (eventType === "incident.resolved") {
+
+      // Get current CW ticket
+      const cwTicket = await getTicket(ticketId);
+      const cwStatus = (cwTicket.status?.name || "").toLowerCase();
+
+const isClosedInCW =
+  cwStatus.includes("cancel") ||
+  cwStatus.includes("close") ||
+  cwStatus.includes("complete");
+
+const isChatAbandoned = cwStatus === "chat abandoned";
+
+     if (isClosedInCW && !isChatAbandoned) {
+  log(`CW ticket #${ticketId} already closed (${cwStatus}) → skipping status update`);
+} else {
+  statusUpdate = "Returned To Normal";
+  log(`PagerDuty resolved → updating CW ticket #${ticketId} to Returned To Normal`);
+}
+
+    }
+
+    if (eventType === "incident.acknowledged") {
+      statusUpdate = "Acknowledged";
+    }
 
     // --- Map PD Priority → CW Priority ---
     let priorityUpdate = null;

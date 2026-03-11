@@ -32,6 +32,21 @@ async function getCompanyByName(name) {
   }
 }
 
+exports.getTicket = async (ticketId) => {
+  try {
+    const res = await axios.get(
+      `https://na.myconnectwise.net/v2025_1/apis/3.0/service/tickets/${ticketId}`,
+      { headers: baseHeaders }
+    );
+
+    return res.data;
+  } catch (err) {
+    const msg = err.response?.data || err.message;
+    error(`Failed to fetch ticket #${ticketId}`, msg);
+    throw err;
+  }
+};
+
 // Create Ticket
 exports.createTicket = async (data) => {
   try {
