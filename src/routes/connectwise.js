@@ -62,13 +62,13 @@ router.post("/webhook", async (req, res) => {
     ];
 
     const normalizedStatus = status.toLowerCase();
-
     const isClosedStatus =
-  normalizedStatus.includes("cancel") ||
-  normalizedStatus.includes("close") ||
-  normalizedStatus.includes("complete");
+      normalizedStatus.includes("cancel") ||
+      normalizedStatus.includes("close") ||
+      normalizedStatus.includes("complete") ||
+      normalizedStatus === "returned to normal";
 
-const isChatAbandoned = normalizedStatus === "chat abandoned";
+    const isChatAbandoned = normalizedStatus === "chat abandoned";
 
     const incidentKey = `CW-${ticket.id}`;
     let existingIncident = await getIncidentByKey(incidentKey);
@@ -103,7 +103,8 @@ const isChatAbandoned = normalizedStatus === "chat abandoned";
           log(` Ticket #${ticket.id} already active in PagerDuty (status: ${pdStatus})`);
         }
 
-} else if (isClosedStatus || isChatAbandoned) {        if (pdStatus !== "resolved") {
+      } else if (isClosedStatus || isChatAbandoned) {
+        if (pdStatus !== "resolved") {
           await updateIncident(existingIncident.id, "resolved");
           log(`Ticket #${ticket.id} → PagerDuty status updated to RESOLVED`);
         } else {

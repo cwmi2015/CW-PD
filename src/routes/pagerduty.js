@@ -130,19 +130,19 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
       const cwTicket = await getTicket(ticketId);
       const cwStatus = (cwTicket.status?.name || "").toLowerCase();
 
-const isClosedInCW =
-  cwStatus.includes("cancel") ||
-  cwStatus.includes("close") ||
-  cwStatus.includes("complete");
+      const isClosedInCW =
+        cwStatus.includes("cancel") ||
+        cwStatus.includes("close") ||
+        cwStatus.includes("complete");
 
-const isChatAbandoned = cwStatus === "chat abandoned";
+      const isChatAbandoned = cwStatus === "chat abandoned";
 
-     if (isClosedInCW && !isChatAbandoned) {
-  log(`CW ticket #${ticketId} already closed (${cwStatus}) → skipping status update`);
-} else {
-  statusUpdate = "Returned To Normal";
-  log(`PagerDuty resolved → updating CW ticket #${ticketId} to Returned To Normal`);
-}
+      if (isClosedInCW && !isChatAbandoned) {
+        log(`CW ticket #${ticketId} already closed (${cwStatus}) → skipping status update`);
+      } else {
+        statusUpdate = "Returned To Normal";
+        log(`PagerDuty resolved → updating CW ticket #${ticketId} to Returned To Normal`);
+      }
 
     }
 
