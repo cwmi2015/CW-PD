@@ -1,4 +1,4 @@
-// src/services/pagerdutyService.js
+// pagerdutyService.js
 const axios = require("axios");
 const { log, error } = require("../utils/logger");
 const incidentLock = new Set(); // Prevent race condition
@@ -189,5 +189,32 @@ exports.getIncidentByKey = async (incidentKey) => {
   } catch (err) {
     error(`Failed to fetch incident by key ${incidentKey}`, err.message);
     return null;
+  }
+};
+
+// Re-trigger a resolved PagerDuty incident (instead of creating a new one)
+exports.retriggerIncident = async (incidentId) => {
+  try {
+    const payload = {
+      incident: { type: "incident", status: "triggered" },
+    };
+
+    const res = await axios.put(
+      `${PD_API_URL}/incidents/${incidentId}`,
+      payload,
+      {
+        headers: {
+          ...pdHeaders,
+          From: process.env.PD_USER_EMAIL,
+        },
+      }
+    );
+
+    log(`🔁 Re-triggered PagerDuty incident ${incidentId}`);
+    return res.data.incident;
+  } catch (err) {
+    const msg = err.response?.data || err.message;
+    error(`Failed to re-trigger PagerDuty incident ${incidentId}`, msg);
+    throw err;
   }
 };

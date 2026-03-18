@@ -1,4 +1,4 @@
-// services/connectwiseService.js
+// connectwiseService.js
 const axios = require("axios");
 const { log, error } = require("../utils/logger");
 

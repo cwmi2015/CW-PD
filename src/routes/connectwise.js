@@ -1,9 +1,9 @@
-// src/routes/connectwise.js
+// connectwise.js
 const express = require("express");
 const router = express.Router();
 const axios = require("axios");
 const { log, error } = require("../utils/logger");
-const { createIncident, updateIncident, getIncidentByKey } = require("../services/pagerdutyService");
+const { createIncident, updateIncident, getIncidentByKey, retriggerIncident } = require("../services/pagerdutyService");
 const { getTicketDescription } = require("../services/connectwiseService");
 
 const CW_URL = process.env.CW_SITE_URL;
@@ -94,15 +94,14 @@ router.post("/webhook", async (req, res) => {
       log(`🔍 Existing PagerDuty incident found (${existingIncident.id}) with status: ${pdStatus}`);
 
       // --- CW Ticket Status Handling ---
+      // ✅ NEW — Re-triggers the existing resolved incident
       if (TRIGGER_STATUSES.includes(status)) {
-        if (pdStatus === "resolved") {
-          // Can't reopen a resolved PD incident → Create a new one
-          const newIncident = await createIncident(ticket);
-          log(`Existing incident was resolved. Created NEW incident ${newIncident.id}`);
+        if (pdStatus === "resolved" || pdStatus === "acknowledged") {
+          await retriggerIncident(existingIncident.id);
+          log(`🔁 Ticket #${ticket.id} Re-Opened → PagerDuty incident ${existingIncident.id} re-triggered`);
         } else {
-          log(` Ticket #${ticket.id} already active in PagerDuty (status: ${pdStatus})`);
+          log(`✅ Ticket #${ticket.id} already active in PagerDuty (status: ${pdStatus})`);
         }
-
       } else if (isClosedStatus || isChatAbandoned) {
         if (pdStatus !== "resolved") {
           await updateIncident(existingIncident.id, "resolved");
