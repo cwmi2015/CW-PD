@@ -1,11 +1,14 @@
 // pagerdutyService.js
 const axios = require("axios");
 const { log, error } = require("../utils/logger");
-const incidentLock = new Set(); // Prevent race condition
 
-// Load from ENV ONLY (fix)
+const incidentLock = new Set();
+
 const PD_API_URL = process.env.PD_API_URL;
 const PD_API_KEY = process.env.PD_API_KEY;
+const PD_EVENTS_URL =
+  process.env.PD_EVENTS_URL ||
+  "https://events.pagerduty.com/v2/enqueue";
 
 const pdHeaders = {
   Authorization: `Token token=${PD_API_KEY}`,
@@ -14,38 +17,74 @@ const pdHeaders = {
   From: process.env.PD_USER_EMAIL,
 };
 
-// Validate ENV
-if (!PD_API_KEY) throw new Error("❌ Missing PD_API_KEY");
-if (!PD_API_URL) throw new Error("❌ Missing PD_API_URL");
-if (!process.env.PD_SERVICE_TS) throw new Error("❌ Missing PD_SERVICE_TS");
-if (!process.env.PD_USER_EMAIL) throw new Error("❌ Missing PD_USER_EMAIL");
+const getRoutingKeyForBoard = (boardName) => {
+  const routingKeys = {
+    "Technical Support": process.env.PD_ROUTING_KEY_TS,
+    "Security Operations Center": process.env.PD_ROUTING_KEY_SOC,
+    Alerts: process.env.PD_ROUTING_KEY_NOC,
+  };
 
-// Create a new PagerDuty incident
+  return routingKeys[boardName];
+};
+
+const getEventSeverity = (priorityName = "") => {
+  const normalizedPriority = priorityName.toLowerCase();
+
+  if (
+    normalizedPriority.includes("emergency") ||
+    normalizedPriority.includes("critical")
+  ) {
+    return "critical";
+  }
+
+  if (normalizedPriority.includes("high")) {
+    return "error";
+  }
+
+  if (normalizedPriority.includes("normal")) {
+    return "warning";
+  }
+
+  return "info";
+};
+
+// Validate required environment variables.
+if (!PD_API_KEY) throw new Error("Missing PD_API_KEY");
+if (!PD_API_URL) throw new Error("Missing PD_API_URL");
+if (!process.env.PD_SERVICE_TS) throw new Error("Missing PD_SERVICE_TS");
+if (!process.env.PD_USER_EMAIL) {
+  throw new Error("Missing PD_USER_EMAIL");
+}
+
+// Create a new PagerDuty incident.
 exports.createIncident = async (ticket) => {
   const incidentKey = `CW-${ticket.id}`;
 
-  // ⛔ Prevent race-condition duplicate creation
   if (incidentLock.has(incidentKey)) {
-    log(`⏳ Waiting: Another process is creating incident for ${incidentKey}`);
+    log(
+      `⏳ Waiting: Another process is creating incident for ${incidentKey}`
+    );
+
     await new Promise((resolve) => setTimeout(resolve, 2000));
   } else {
     incidentLock.add(incidentKey);
   }
 
   try {
-    // 🛑 Check again after lock (avoid duplicate)
-    let existing = await exports.getIncidentByKey(incidentKey);
+    const existing = await exports.getIncidentByKey(incidentKey);
+
     if (existing) {
-      log(`⚠ Incident for ${incidentKey} already exists → ${existing.id}`);
+      log(
+        `⚠ Incident for ${incidentKey} already exists → ${existing.id}`
+      );
+
       return existing;
     }
 
-    // 🚀 Proceed with creation
     let serviceId;
+
     if (ticket.board?.name === "Technical Support") {
       const summary = ticket.summary || "";
-
-      // Normalize: convert multiple spaces → single space
       const summaryNormalized = summary.replace(/\s+/g, " ").trim();
 
       const allowedKeywords = [
@@ -54,42 +93,57 @@ exports.createIncident = async (ticket) => {
         "via Technical Support",
       ];
 
-      const containsAllowed = allowedKeywords.some((kw) =>
-        new RegExp(kw.replace(/\s+/g, "\\s+"), "i").test(summaryNormalized)
+      const containsAllowed = allowedKeywords.some((keyword) =>
+        new RegExp(
+          keyword.replace(/\s+/g, "\\s+"),
+          "i"
+        ).test(summaryNormalized)
       );
 
       if (!containsAllowed) {
         log(
           `Skipped incident creation for Ticket #${ticket.id} — summary does not contain allowed keywords`
         );
+
         return null;
       }
+
       serviceId = process.env.PD_SERVICE_TS;
     } else if (ticket.board?.name === "Security Operations Center") {
       serviceId = process.env.PD_SERVICE_SOC;
     } else if (ticket.board?.name === "Alerts") {
       serviceId = process.env.PD_SERVICE_NOC;
     } else {
-      throw new Error(`Ticket board "${ticket.board?.name}" is not mapped`);
+      throw new Error(
+        `Ticket board "${ticket.board?.name}" is not mapped`
+      );
     }
 
-    // Priority handling...
-    const priorityName = (ticket.priority?.name || "").toLowerCase();
+    const priorityName = (
+      ticket.priority?.name || ""
+    ).toLowerCase();
+
     let priorityId = null;
     let urgency = "low";
     let priorityCode = null;
 
-    if (["1a - emergency", "1b - emergency"].includes(priorityName)) {
+    if (
+      ["1a - emergency", "1b - emergency"].includes(priorityName)
+    ) {
       priorityId = process.env.PD_PRIORITY_P1;
       urgency = "high";
       priorityCode = "P1";
     } else if (
-      ["2a - critical", "2b - critical", "2c - critical"].includes(priorityName)
+      [
+        "2a - critical",
+        "2b - critical",
+        "2c - critical",
+      ].includes(priorityName)
     ) {
       priorityId = process.env.PD_PRIORITY_P2;
       urgency = "high";
       priorityCode = "P2";
-    } else if (["3 - high"].includes(priorityName)) {
+    } else if (priorityName === "3 - high") {
       priorityId = process.env.PD_PRIORITY_P3;
       urgency = "high";
       priorityCode = "P3";
@@ -97,43 +151,66 @@ exports.createIncident = async (ticket) => {
       log(
         `Ticket #${ticket.id} skipped — priority "${ticket.priority?.name}" is NOT allowed for PagerDuty.`
       );
+
       return null;
     }
 
-    const summaryClean = (ticket.summary || "No summary")
+    const summaryClean = (
+      ticket.summary || "No summary"
+    )
       .replace(/\s+/g, " ")
       .trim();
+
     const title = `${priorityCode} | #${ticket.id} - ${summaryClean}`;
 
     const payload = {
       incident: {
         type: "incident",
         title,
-        service: { id: serviceId, type: "service_reference" },
+        service: {
+          id: serviceId,
+          type: "service_reference",
+        },
         urgency,
-        priority: { id: priorityId, type: "priority_reference" },
+        priority: {
+          id: priorityId,
+          type: "priority_reference",
+        },
         body: {
           type: "incident_body",
           details:
-            ticket.description || ticket.summary || "No details provided.",
+            ticket.description ||
+            ticket.summary ||
+            "No details provided.",
         },
-        incident_key: incidentKey, // 🔑 ensures uniqueness
+        incident_key: incidentKey,
       },
     };
 
-    // 🛠 Create Incident
-    const res = await axios.post(`${PD_API_URL}/incidents`, payload, {
-      headers: pdHeaders,
-    });
+    const res = await axios.post(
+      `${PD_API_URL}/incidents`,
+      payload,
+      { headers: pdHeaders }
+    );
+
     const incident = res.data?.incident;
-    if (!incident) throw new Error("PagerDuty did not return incident object");
+
+    if (!incident) {
+      throw new Error(
+        "PagerDuty did not return incident object"
+      );
+    }
 
     log(`🎯 Created PagerDuty incident ${incident.id}`);
 
     if (ticket.description) {
       await axios.post(
         `${PD_API_URL}/incidents/${incident.id}/notes`,
-        { note: { content: ticket.description } },
+        {
+          note: {
+            content: ticket.description,
+          },
+        },
         { headers: pdHeaders }
       );
     }
@@ -144,17 +221,21 @@ exports.createIncident = async (ticket) => {
       "🚨 Failed to create PagerDuty incident",
       err.response?.data || err.message
     );
+
     throw err;
   } finally {
-    incidentLock.delete(incidentKey); // 🔓 Unlock
+    incidentLock.delete(incidentKey);
   }
 };
 
-// Update PagerDuty incident (acknowledge / resolve)
+// Update PagerDuty incident, normally for resolution.
 exports.updateIncident = async (incidentId, status) => {
   try {
     const payload = {
-      incident: { type: "incident", status },
+      incident: {
+        type: "incident",
+        status,
+      },
     };
 
     const res = await axios.put(
@@ -168,16 +249,24 @@ exports.updateIncident = async (incidentId, status) => {
       }
     );
 
-    log(`Updated PagerDuty incident ${incidentId} → ${status}`);
+    log(
+      `Updated PagerDuty incident ${incidentId} → ${status}`
+    );
+
     return res.data.incident;
   } catch (err) {
     const msg = err.response?.data || err.message;
-    error(`Failed to update PagerDuty incident ${incidentId}`, msg);
+
+    error(
+      `Failed to update PagerDuty incident ${incidentId}`,
+      msg
+    );
+
     throw err;
   }
 };
 
-// Get PagerDuty Incident by Key (CW Ticket ID)
+// Get a PagerDuty incident by its ConnectWise incident key.
 exports.getIncidentByKey = async (incidentKey) => {
   try {
     const res = await axios.get(
@@ -187,16 +276,91 @@ exports.getIncidentByKey = async (incidentKey) => {
 
     return res.data?.incidents?.[0] || null;
   } catch (err) {
-    error(`Failed to fetch incident by key ${incidentKey}`, err.message);
+    error(
+      `Failed to fetch incident by key ${incidentKey}`,
+      err.message
+    );
+
     return null;
   }
 };
 
-// Re-trigger a resolved PagerDuty incident (instead of creating a new one)
-exports.retriggerIncident = async (incidentId) => {
+// Re-trigger a PagerDuty incident.
+exports.retriggerIncident = async (
+  existingIncident,
+  incidentKey,
+  ticket
+) => {
+  const incidentId =
+    existingIncident?.id || existingIncident;
+
   try {
+    // PagerDuty rejects REST status="triggered" for an acknowledged
+    // incident. Use the Events API for that case.
+    if (existingIncident?.status === "acknowledged") {
+      const routingKey = getRoutingKeyForBoard(
+        ticket?.board?.name
+      );
+
+      if (!routingKey) {
+        throw new Error(
+          `Missing PagerDuty routing key for board "${ticket?.board?.name}". ` +
+          "Set PD_ROUTING_KEY_NOC, PD_ROUTING_KEY_SOC, or PD_ROUTING_KEY_TS."
+        );
+      }
+
+      const eventPayload = {
+        routing_key: routingKey,
+        event_action: "trigger",
+        dedup_key: incidentKey,
+        payload: {
+          summary:
+            existingIncident.summary ||
+            existingIncident.title ||
+            `ConnectWise ticket #${ticket?.id || "unknown"} reopened`,
+          source:
+            `ConnectWise ticket #${ticket?.id || "unknown"}`,
+          severity: getEventSeverity(
+            ticket?.priority?.name
+          ),
+          custom_details: {
+            connectwise_ticket_id: ticket?.id,
+            board: ticket?.board?.name,
+            status: ticket?.status?.name,
+          },
+        },
+      };
+
+      const eventRes = await axios.post(
+        PD_EVENTS_URL,
+        eventPayload,
+        {
+          headers: {
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      if (eventRes.data?.status !== "success") {
+        throw new Error(
+          "PagerDuty Events API did not accept the trigger: " +
+            JSON.stringify(eventRes.data)
+        );
+      }
+
+      log(
+        `🔁 Re-triggered acknowledged PagerDuty incident ${incidentId} via Events API`
+      );
+
+      return eventRes.data;
+    }
+
+    // Resolved incidents continue using the existing working path.
     const payload = {
-      incident: { type: "incident", status: "triggered" },
+      incident: {
+        type: "incident",
+        status: "triggered",
+      },
     };
 
     const res = await axios.put(
@@ -210,11 +374,19 @@ exports.retriggerIncident = async (incidentId) => {
       }
     );
 
-    log(`🔁 Re-triggered PagerDuty incident ${incidentId}`);
+    log(
+      `🔁 Re-triggered resolved PagerDuty incident ${incidentId}`
+    );
+
     return res.data.incident;
   } catch (err) {
     const msg = err.response?.data || err.message;
-    error(`Failed to re-trigger PagerDuty incident ${incidentId}`, msg);
+
+    error(
+      `Failed to re-trigger PagerDuty incident ${incidentId}`,
+      msg
+    );
+
     throw err;
   }
 };
