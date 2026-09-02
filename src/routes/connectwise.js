@@ -87,14 +87,12 @@ router.post("/webhook", async (req, res) => {
 
     const status = (ticket.status?.name || "").trim();
 
-    // ConnectWise can format the same status as "Reopened",
-    // "Re-Opened", or "Re opened" depending on the source.
+    // Normalize status spelling, spacing, capitalization, and punctuation.
     const normalizeStatus = (value) =>
       String(value || "")
         .toLowerCase()
         .replace(/[^a-z0-9]/g, "");
 
-    // --- Define Status Mapping ---
     const TRIGGER_STATUSES = new Set([
       "new",
       "reopened",
@@ -125,19 +123,14 @@ router.post("/webhook", async (req, res) => {
         `🕵️ No incident found initially for ${incidentKey}. Verifying once more after delay...`
       );
 
-      // Wait 2 seconds to let PagerDuty register before checking again.
       await new Promise((resolve) => setTimeout(resolve, 2000));
 
-      // Final check to prevent duplicates.
       existingIncident = await getIncidentByKey(incidentKey);
     }
 
     if (!existingIncident) {
-      // Still not found, so create a new incident.
       const newIncident = await createIncident(ticket);
 
-      // Some tickets are intentionally skipped by PagerDuty rules,
-      // such as unsupported priorities or Technical Support summaries.
       if (!newIncident) {
         log(`No PagerDuty incident created for Ticket #${ticket.id}`);
 
@@ -154,19 +147,16 @@ router.post("/webhook", async (req, res) => {
         `Created NEW PagerDuty incident for Ticket #${ticket.id} → Incident ID: ${newIncident.id}`
       );
     } else {
-      // --- Existing PagerDuty Incident Found ---
       const pdStatus = existingIncident.status;
 
       log(
         `🔍 Existing PagerDuty incident found (${existingIncident.id}) with status: ${pdStatus}`
       );
 
-      // --- CW Ticket Status Handling ---
-      // Re-trigger the existing PagerDuty incident when the
-      // ConnectWise ticket is new or reopened.
+      // Re-trigger resolved or acknowledged incidents.
       if (TRIGGER_STATUSES.has(normalizedStatus)) {
         if (pdStatus === "resolved" || pdStatus === "acknowledged") {
-          await retriggerIncident(existingIncident.id);
+          await retriggerIncident(existingIncident, incidentKey, ticket);
 
           log(
             `🔁 Ticket #${ticket.id} Re-Opened → PagerDuty incident ${existingIncident.id} re-triggered`
