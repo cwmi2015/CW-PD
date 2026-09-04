@@ -180,8 +180,19 @@ exports.updateIncident = async (incidentId, status) => {
 // Get PagerDuty Incident by Key (CW Ticket ID)
 exports.getIncidentByKey = async (incidentKey) => {
   try {
+    // Resolved incidents are not included by PagerDuty's default list filter.
+    // Search all statuses and dates so a CW reopen can find the original incident.
+    const query = [
+      `incident_key=${encodeURIComponent(incidentKey)}`,
+      "date_range=all",
+      "statuses%5B%5D=triggered",
+      "statuses%5B%5D=acknowledged",
+      "statuses%5B%5D=resolved",
+      "limit=1",
+    ].join("&");
+
     const res = await axios.get(
-      `${PD_API_URL}/incidents?incident_key=${incidentKey}&limit=1`,
+      `${PD_API_URL}/incidents?${query}`,
       { headers: pdHeaders }
     );
 
