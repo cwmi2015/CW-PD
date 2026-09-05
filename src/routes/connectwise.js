@@ -18,6 +18,7 @@ const PUBLIC_KEY = process.env.CW_PUBLIC_KEY;
 const PRIVATE_KEY = process.env.CW_PRIVATE_KEY;
 const CLIENT_ID = process.env.CW_CLIENT_ID;
 const allowedBoards = ["Technical Support", "Security Operations Center", "Alerts"];
+const lastObservedStatus = new Map();
 
 const authHeader =
   "Basic " + Buffer.from(`${COMPANY}+${PUBLIC_KEY}:${PRIVATE_KEY}`).toString("base64");
@@ -75,6 +76,8 @@ router.post("/webhook", async (req, res) => {
     ]);
 
     const normalizedStatus = normalizeStatus(status);
+    const previousNormalizedStatus = lastObservedStatus.get(String(ticket.id));
+    lastObservedStatus.set(String(ticket.id), normalizedStatus);
     const isClosedStatus =
       normalizedStatus.includes("cancel") ||
       normalizedStatus.includes("close") ||
@@ -133,10 +136,18 @@ router.post("/webhook", async (req, res) => {
         if (pdStatus === "resolved") {
           await retriggerIncident(existingIncident);
           log(`🔁 Ticket #${ticket.id} Re-Opened → PagerDuty incident ${existingIncident.id} re-triggered`);
-        } else if (normalizedStatus === "reopened" && pdStatus === "acknowledged") {
+        } else if (
+          normalizedStatus === "reopened" &&
+          pdStatus === "acknowledged" &&
+          previousNormalizedStatus !== "reopened"
+        ) {
           await requestResponderNotification(existingIncident, ticket);
           log(
             `📣 Ticket #${ticket.id} Re-Opened → PagerDuty responder notification requested for incident ${existingIncident.id}`
+          );
+        } else if (normalizedStatus === "reopened" && pdStatus === "acknowledged") {
+          log(
+            `⏭️ Ticket #${ticket.id} is still Re-Opened → skipping duplicate PagerDuty responder notification`
           );
         } else {
           log(`✅ Ticket #${ticket.id} already active in PagerDuty (status: ${pdStatus})`);
