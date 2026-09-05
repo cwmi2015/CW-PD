@@ -35,7 +35,8 @@ function isAcceptedResponderReply(eventType, data) {
   const replyValues = [];
   const collectReplyValues = (value, key = "", insideReplyField = false) => {
     const isReplyField =
-      insideReplyField || /(response|reply|answer|action|choice|decision|status)/i.test(key);
+      insideReplyField ||
+      /(response|reply|answer|action|choice|decision|status|state)/i.test(key);
 
     if (Array.isArray(value)) {
       value.forEach(item => collectReplyValues(item, key, isReplyField));
@@ -73,6 +74,38 @@ function getTicketIdFromIncident(incident, data) {
   return titleMatch ? titleMatch[1] : null;
 }
 
+async function getFullPagerDutyIncident(incident) {
+  if (
+    !incident?.id ||
+    (incident.service?.id && incident.title && incident.incident_key)
+  ) {
+    return incident;
+  }
+
+  try {
+    const res = await axios.get(
+      `${process.env.PD_API_URL || "https://api.pagerduty.com"}/incidents/${incident.id}`,
+      {
+        headers: {
+          Authorization: `Token token=${process.env.PD_API_KEY}`,
+          Accept: "application/vnd.pagerduty+json;version=2",
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const fullIncident = res.data?.incident;
+    if (fullIncident) {
+      log(`Fetched full PagerDuty incident details for ${incident.id}`);
+      return { ...incident, ...fullIncident };
+    }
+  } catch (err) {
+    error(`Failed to fetch full PagerDuty incident ${incident?.id}`, err.message);
+  }
+
+  return incident;
+}
+
 // --- Verify PagerDuty v3 Signature using service-specific secret ---
 function verifyPagerDutySignature(req, secret) {
   try {
@@ -108,7 +141,13 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
 
     const data = event.data;
     const eventType = event.event_type;
-    const incident = data.incident || data; // handle both cases
+    let incident = data.incident || data; // handle both cases
+
+    // Responder reply events contain only a partial incident reference. Fetch
+    // the full incident so service routing and the CW incident key are reliable.
+    if (RESPONDER_REPLY_EVENT_TYPES.has(String(eventType || "").toLowerCase())) {
+      incident = await getFullPagerDutyIncident(incident);
+    }
 
     // --- Handle annotation events (notes added in PagerDuty UI) ---
     if (eventType === "incident.annotated") {
