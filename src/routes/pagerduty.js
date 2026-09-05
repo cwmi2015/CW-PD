@@ -269,7 +269,14 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
     // --- Map PD Priority → CW Priority ---
     let priorityUpdate = null;
     const pdPriorityId = incident.priority?.id;
-    if (pdPriorityId) {
+    const isResponderReplyEvent = RESPONDER_REPLY_EVENT_TYPES.has(
+      String(eventType || "").toLowerCase()
+    );
+
+    // A responder reply is not a priority change. Avoid sending a redundant
+    // priority patch back to CW, which can create another Reopened webhook and
+    // repeat the responder request when the reply was not accepted.
+    if (pdPriorityId && !isResponderReplyEvent) {
       switch (pdPriorityId) {
         case process.env.PD_PRIORITY_P1:
           priorityUpdate = "1a - Emergency";
