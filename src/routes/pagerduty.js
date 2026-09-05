@@ -8,6 +8,71 @@ const { updateTicket, addTicketNote, getTicket } = require("../services/connectw
 
 let lastWebhookEvent = null;
 
+const RESPONDER_REPLY_EVENT_TYPES = new Set([
+  "incident.responder.replied",
+  // Keep compatibility with alternate event names used by older webhook payloads.
+  "responder.replied",
+  "incident.responder_request_replied",
+  "responder_request_replied",
+]);
+
+const ACCEPTED_RESPONDER_REPLIES = new Set(["accept", "accepted"]);
+
+function normalizeWebhookValue(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, " ");
+}
+
+// PagerDuty payloads have used response/reply fields in different nested
+// locations. Only inspect reply-related fields and require an explicit Accept.
+function isAcceptedResponderReply(eventType, data) {
+  if (!RESPONDER_REPLY_EVENT_TYPES.has(String(eventType || "").toLowerCase())) {
+    return false;
+  }
+
+  const replyValues = [];
+  const collectReplyValues = (value, key = "", insideReplyField = false) => {
+    const isReplyField =
+      insideReplyField || /(response|reply|answer|action|choice|decision|status)/i.test(key);
+
+    if (Array.isArray(value)) {
+      value.forEach(item => collectReplyValues(item, key, isReplyField));
+      return;
+    }
+
+    if (!value || typeof value !== "object") {
+      if (isReplyField) {
+        replyValues.push(value);
+      }
+      return;
+    }
+
+    Object.entries(value).forEach(([childKey, childValue]) => {
+      collectReplyValues(childValue, childKey, isReplyField);
+    });
+  };
+
+  collectReplyValues(data);
+  return replyValues.some(value =>
+    ACCEPTED_RESPONDER_REPLIES.has(normalizeWebhookValue(value))
+  );
+}
+
+function getTicketIdFromIncident(incident, data) {
+  const incidentKey =
+    incident?.incident_key ||
+    data?.incident_key ||
+    data?.responder_request?.incident_key ||
+    data?.responder_request?.incident?.incident_key;
+  const keyMatch = String(incidentKey || "").match(/(?:^|[^A-Z0-9])CW-(\d+)(?:$|[^0-9])/i);
+  if (keyMatch) return keyMatch[1];
+
+  const titleMatch = String(incident?.title || "").match(/#(\d+)/);
+  return titleMatch ? titleMatch[1] : null;
+}
+
 // --- Verify PagerDuty v3 Signature using service-specific secret ---
 function verifyPagerDutySignature(req, secret) {
   try {
@@ -52,8 +117,7 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
         incident?.summary ||
         "Annotation added in PagerDuty";
 
-      const match = incident.title?.match(/#(\d+)/);
-      const ticketId = match ? match[1] : null;
+      const ticketId = getTicketIdFromIncident(incident, data);
 
       if (ticketId) {
         await addTicketNote(ticketId, noteText, "Detail");
@@ -113,8 +177,7 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
     }
 
     // --- Extract ConnectWise Ticket ID ---
-    const match = incident.title?.match(/#(\d+)/);
-    const ticketId = match ? match[1] : null;
+    const ticketId = getTicketIdFromIncident(incident, data);
     if (!ticketId) {
       log(`No ConnectWise ticket ID found in incident title`);
       return res.status(200).json({ message: "No ConnectWise ticket ID found" });
@@ -149,6 +212,19 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
 
     if (eventType === "incident.acknowledged") {
       statusUpdate = "Acknowledged";
+    }
+
+    if (isAcceptedResponderReply(eventType, data)) {
+      statusUpdate = "Acknowledged";
+      log(
+        `PagerDuty responder accepted the request for incident ${incident.id} ` +
+          `→ updating ConnectWise Ticket #${ticketId} to Acknowledged`
+      );
+    } else if (RESPONDER_REPLY_EVENT_TYPES.has(String(eventType || "").toLowerCase())) {
+      log(
+        `PagerDuty responder reply for incident ${incident.id} was not an accepted response ` +
+          `→ leaving ConnectWise Ticket #${ticketId} unchanged`
+      );
     }
 
     // --- Map PD Priority → CW Priority ---
