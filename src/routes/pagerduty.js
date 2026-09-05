@@ -16,7 +16,11 @@ const RESPONDER_REPLY_EVENT_TYPES = new Set([
   "responder_request_replied",
 ]);
 
-const ACCEPTED_RESPONDER_REPLIES = new Set(["accept", "accepted"]);
+const ACCEPTED_RESPONDER_REPLIES = new Set([
+  "accept",
+  "accepted",
+  "joined"
+]);
 
 function normalizeWebhookValue(value) {
   return String(value || "")
