@@ -8,7 +8,6 @@ const {
   updateIncident,
   getIncidentByKey,
   retriggerIncident,
-  requestResponderNotification,
 } = require("../services/pagerdutyService");
 const { getTicketDescription } = require("../services/connectwiseService");
 
@@ -141,13 +140,15 @@ router.post("/webhook", async (req, res) => {
           pdStatus === "acknowledged" &&
           previousNormalizedStatus !== "reopened"
         ) {
-          await requestResponderNotification(existingIncident, ticket);
+          // Re-trigger the same incident so PagerDuty sends a normal alert
+          // with Ack behavior instead of a responder request with Accept/Decline.
+          await retriggerIncident(existingIncident);
           log(
-            `📣 Ticket #${ticket.id} Re-Opened → PagerDuty responder notification requested for incident ${existingIncident.id}`
+            `🔁 Ticket #${ticket.id} Re-Opened → PagerDuty incident ${existingIncident.id} re-triggered`
           );
         } else if (normalizedStatus === "reopened" && pdStatus === "acknowledged") {
           log(
-            `⏭️ Ticket #${ticket.id} is still Re-Opened → skipping duplicate PagerDuty responder notification`
+            `⏭️ Ticket #${ticket.id} is still Re-Opened → skipping duplicate PagerDuty re-trigger`
           );
         } else {
           log(`✅ Ticket #${ticket.id} already active in PagerDuty (status: ${pdStatus})`);
