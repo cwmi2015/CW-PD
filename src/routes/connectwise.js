@@ -10,6 +10,10 @@ const {
   retriggerIncident,
 } = require("../services/pagerdutyService");
 const { getTicketDescription } = require("../services/connectwiseService");
+const {
+  markSyntheticResolution,
+  clearSyntheticResolution,
+} = require("../services/pagerdutyTransitionGuard");
 
 const CW_URL = process.env.CW_SITE_URL;
 const COMPANY = process.env.CW_COMPANY_ID;
@@ -140,9 +144,19 @@ router.post("/webhook", async (req, res) => {
           pdStatus === "acknowledged" &&
           previousNormalizedStatus !== "reopened"
         ) {
-          // Re-trigger the same incident so PagerDuty sends a normal alert
-          // with Ack behavior instead of a responder request with Accept/Decline.
-          await retriggerIncident(existingIncident);
+          // PagerDuty does not allow Acknowledged -> Triggered directly.
+          // Resolve and immediately re-trigger the same incident instead.
+          // Guard the temporary resolved webhook so it cannot change CW to RTN.
+          markSyntheticResolution(existingIncident.id);
+          try {
+            await updateIncident(existingIncident.id, "resolved");
+            await retriggerIncident(existingIncident);
+          } catch (err) {
+            clearSyntheticResolution(existingIncident.id);
+            // Allow a later webhook to retry after a failed PagerDuty call.
+            lastObservedStatus.delete(String(ticket.id));
+            throw err;
+          }
           log(
             `🔁 Ticket #${ticket.id} Re-Opened → PagerDuty incident ${existingIncident.id} re-triggered`
           );
