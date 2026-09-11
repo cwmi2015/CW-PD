@@ -5,6 +5,7 @@ const axios = require("axios");
 const router = express.Router();
 const { log, error } = require("../utils/logger");
 const { updateTicket, addTicketNote, getTicket } = require("../services/connectwiseService");
+const { isSyntheticResolution } = require("../services/pagerdutyTransitionGuard");
 
 let lastWebhookEvent = null;
 
@@ -16,11 +17,7 @@ const RESPONDER_REPLY_EVENT_TYPES = new Set([
   "responder_request_replied",
 ]);
 
-const ACCEPTED_RESPONDER_REPLIES = new Set([
-  "accept",
-  "accepted",
-  "joined"
-]);
+const ACCEPTED_RESPONDER_REPLIES = new Set(["accept", "accepted"]);
 
 function normalizeWebhookValue(value) {
   return String(value || "")
@@ -227,6 +224,17 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
     }
 
     log(`Matched PagerDuty incident → ConnectWise Ticket #${ticketId} (Service: ${serviceName})`);
+
+    // Acknowledge-to-reopen is implemented as resolve-then-trigger because
+    // PagerDuty rejects a direct Acknowledged -> Triggered transition. Ignore
+    // only that temporary resolved webhook; real resolutions still sync to CW.
+    if (eventType === "incident.resolved" && isSyntheticResolution(incident.id)) {
+      log(
+        `Ignored temporary PagerDuty resolution for incident ${incident.id} ` +
+          `during ConnectWise ticket #${ticketId} re-trigger`
+      );
+      return res.status(200).json({ message: "Temporary resolution ignored" });
+    }
 
     // --- Map PagerDuty → CW Status ---
     let statusUpdate = null;
