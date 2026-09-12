@@ -203,11 +203,12 @@ exports.getIncidentByKey = async (incidentKey) => {
   }
 };
 
-// Re-trigger a resolved incident through the REST API.
+// Re-trigger an existing incident through the REST API.
 exports.retriggerIncident = async (existingIncident) => {
   const incidentId = existingIncident?.id || existingIncident;
 
   try {
+    log(`PagerDuty transition starting: incident ${incidentId} → triggered`);
     const payload = {
       incident: { type: "incident", status: "triggered" },
     };
@@ -223,12 +224,27 @@ exports.retriggerIncident = async (existingIncident) => {
       }
     );
 
-    log(`🔁 Re-triggered resolved PagerDuty incident ${incidentId}`);
+    log(`🔁 Re-triggered PagerDuty incident ${incidentId}`);
     return res.data.incident;
   } catch (err) {
     const msg = err.response?.data || err.message;
     error(`Failed to re-trigger PagerDuty incident ${incidentId}`, msg);
     throw err;
+  }
+};
+
+// Read the recent PagerDuty timeline entries so webhook logs can identify
+// whether an action came from the web app, mobile app, phone, SMS, or API.
+exports.getIncidentLogEntries = async (incidentId, limit = 10) => {
+  try {
+    const res = await axios.get(
+      `${PD_API_URL}/incidents/${incidentId}/log_entries?limit=${limit}`,
+      { headers: pdHeaders }
+    );
+    return res.data?.log_entries || [];
+  } catch (err) {
+    error(`Failed to fetch PagerDuty log entries for incident ${incidentId}`, err.message);
+    return [];
   }
 };
 
