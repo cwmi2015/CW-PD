@@ -9,7 +9,13 @@ function normalizeId(incidentId) {
 
 function markSyntheticResolution(incidentId) {
   const id = normalizeId(incidentId);
-  if (id) guardedIncidents.set(id, Date.now() + GUARD_TTL_MS);
+  if (id) {
+    const expiresAt = Date.now() + GUARD_TTL_MS;
+    guardedIncidents.set(id, expiresAt);
+    return expiresAt;
+  }
+
+  return null;
 }
 
 function isSyntheticResolution(incidentId) {
