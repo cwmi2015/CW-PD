@@ -12,6 +12,7 @@ let lastWebhookEvent = null;
 
 const RESPONDER_REPLY_EVENT_TYPES = new Set([
   "incident.responder.replied",
+  // Keep compatibility with alternate event names used by older webhook payloads.
   "responder.replied",
   "incident.responder_request_replied",
   "responder_request_replied",
@@ -28,14 +29,22 @@ function normalizeWebhookValue(value) {
 
 function getReferenceLabel(reference) {
   if (!reference) return "unknown";
-  if (typeof reference === "string") return reference;
-  return reference.summary || reference.name || reference.id || reference.type || "unknown";
+  if (typeof reference === "string") return redactSensitiveText(reference);
+  return redactSensitiveText(
+    reference.summary || reference.name || reference.id || reference.type || "unknown"
+  );
 }
 
 function getPagerDutyChannelType(channel) {
   if (!channel) return "not listed";
-  if (typeof channel === "string") return channel;
-  return channel.type || channel.name || "not listed";
+  if (typeof channel === "string") return redactSensitiveText(channel);
+  return redactSensitiveText(channel.name || channel.summary || channel.type || "not listed");
+}
+
+function redactSensitiveText(value) {
+  return String(value || "")
+    .replace(/[+]?\d[\d\s().-]{6,}\d/g, "[redacted phone]")
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted email]");
 }
 
 function getLogEntrySummary(entry) {
@@ -45,7 +54,18 @@ function getLogEntrySummary(entry) {
     entry?.details?.description ||
     "";
 
-  return String(summary).replace(/\s+/g, " ").trim().slice(0, 300);
+  return redactSensitiveText(summary).replace(/\s+/g, " ").trim().slice(0, 300);
+}
+
+function getLogEntryRecipient(entry) {
+  return getReferenceLabel(
+    entry?.recipient ||
+      entry?.notification?.recipient ||
+      entry?.target ||
+      entry?.assignee ||
+      entry?.assignees?.[0] ||
+      entry?.responder
+  );
 }
 
 function getPagerDutyEventContext(event, data) {
@@ -56,14 +76,12 @@ function getPagerDutyEventContext(event, data) {
     data?.user ||
     data?.responder_request?.requester ||
     null;
-
   const channel =
     event?.channel ||
     data?.channel ||
     data?.notification?.channel ||
     data?.responder_request?.channel ||
     null;
-
   const channelType = getPagerDutyChannelType(channel);
 
   return {
@@ -80,38 +98,48 @@ function getPagerDutyEventContext(event, data) {
 async function logRecentPagerDutyChannels(incidentId, eventType) {
   if (!incidentId) return;
 
-  const entries = await getIncidentLogEntries(incidentId, 10);
-
-  const recentEntries = entries.slice(0, 10).map(entry => ({
+  const entries = await getIncidentLogEntries(incidentId, 100);
+  const recentEntries = entries.slice(0, 100).map(entry => ({
     type: entry.type || "unknown",
     channelType: getPagerDutyChannelType(entry.channel),
+    recipient: getLogEntryRecipient(entry),
     agent: getReferenceLabel(entry.agent),
+    deliveryStatus:
+      entry.notification?.status || entry.delivery?.status || "not listed",
     createdAt: entry.created_at || "unknown",
     summary: getLogEntrySummary(entry),
   }));
 
   const notifications = recentEntries.filter(entry =>
-    /notify|notification|notified/i.test(`${entry.type} ${entry.summary}`)
+    /notify|notification|notified|deliver/i.test(`${entry.type} ${entry.summary}`)
   );
-
   const escalations = recentEntries.filter(entry =>
     /escalat/i.test(`${entry.type} ${entry.summary}`)
   );
+  const acknowledgements = recentEntries.filter(entry =>
+    /acknowledg|accept|joined/i.test(`${entry.type} ${entry.summary}`)
+  );
 
-  log(`PagerDuty activity after ${eventType} for incident ${incidentId}`, {
-    notifications,
-    escalations,
-    recentEntries,
-  });
+  log(
+    `PagerDuty activity after ${eventType} for incident ${incidentId}`,
+    {
+      capturedEntryCount: recentEntries.length,
+      notifications,
+      escalations,
+      acknowledgements,
+      recentEntries,
+    }
+  );
 }
 
+// PagerDuty payloads have used response/reply fields in different nested
+// locations. Only inspect reply-related fields and require an explicit Accept.
 function isAcceptedResponderReply(eventType, data) {
   if (!RESPONDER_REPLY_EVENT_TYPES.has(String(eventType || "").toLowerCase())) {
     return false;
   }
 
   const replyValues = [];
-
   const collectReplyValues = (value, key = "", insideReplyField = false) => {
     const isReplyField =
       insideReplyField ||
@@ -135,7 +163,6 @@ function isAcceptedResponderReply(eventType, data) {
   };
 
   collectReplyValues(data);
-
   return replyValues.some(value =>
     ACCEPTED_RESPONDER_REPLIES.has(normalizeWebhookValue(value))
   );
@@ -147,11 +174,7 @@ function getTicketIdFromIncident(incident, data) {
     data?.incident_key ||
     data?.responder_request?.incident_key ||
     data?.responder_request?.incident?.incident_key;
-
-  const keyMatch = String(incidentKey || "").match(
-    /(?:^|[^A-Z0-9])CW-(\d+)(?:$|[^0-9])/i
-  );
-
+  const keyMatch = String(incidentKey || "").match(/(?:^|[^A-Z0-9])CW-(\d+)(?:$|[^0-9])/i);
   if (keyMatch) return keyMatch[1];
 
   const titleMatch = String(incident?.title || "").match(/#(\d+)/);
@@ -179,7 +202,6 @@ async function getFullPagerDutyIncident(incident) {
     );
 
     const fullIncident = res.data?.incident;
-
     if (fullIncident) {
       log(`Fetched full PagerDuty incident details for ${incident.id}`);
       return { ...incident, ...fullIncident };
@@ -191,17 +213,16 @@ async function getFullPagerDutyIncident(incident) {
   return incident;
 }
 
+// --- Verify PagerDuty v3 Signature using service-specific secret ---
 function verifyPagerDutySignature(req, secret) {
   try {
     const signatureHeader = req.get("X-PagerDuty-Signature");
-
     if (!signatureHeader) return false;
 
-    const rawBody = req.body;
+    const rawBody = req.body; // Buffer
+
     const hmac = crypto.createHmac("sha256", secret);
-
     hmac.update(rawBody);
-
     const expectedSignature = `v1=${hmac.digest("hex")}`;
 
     return signatureHeader
@@ -213,346 +234,306 @@ function verifyPagerDutySignature(req, secret) {
   }
 }
 
-router.post(
-  "/webhook",
-  express.raw({ type: "application/json" }),
-  async (req, res) => {
-    try {
-      const rawBody = req.body;
-      const body = JSON.parse(rawBody.toString("utf8"));
+// --- PAGERDUTY Webhook Handler ---
+router.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  try {
+    const rawBody = req.body;
+    const body = JSON.parse(rawBody.toString("utf8"));
+    lastWebhookEvent = body;
 
-      lastWebhookEvent = body;
+    const event = body.event;
+    if (!event || !event.data) {
+      return res.status(200).json({ message: "Invalid PagerDuty v3 payload" });
+    }
 
-      const event = body.event;
+    const data = event.data;
+    const eventType = event.event_type;
+    let incident = data.incident || data; // handle both cases
 
-      if (!event || !event.data) {
-        return res
-          .status(200)
-          .json({ message: "Invalid PagerDuty v3 payload" });
-      }
+    const eventContext = getPagerDutyEventContext(event, data);
+    log(
+      `📨 PagerDuty event ${eventType || "unknown"} ` +
+        `(id=${event.id || "unknown"}, occurred=${event.occurred_at || "unknown"}): ` +
+        `actor=${eventContext.actor} (${eventContext.actorType}), ` +
+        `channel=${eventContext.channel} (${eventContext.channelType})`
+    );
 
-      const data = event.data;
-      const eventType = event.event_type;
-      let incident = data.incident || data;
+    if (eventType === "incident.escalated") {
+      log(`🚨 PagerDuty escalation event received for incident ${incident?.id || "unknown"}`);
+    }
+    if (eventType === "incident.acknowledged") {
+      log(`✅ PagerDuty acknowledgment event received for incident ${incident?.id || "unknown"}`);
+    }
 
-      const eventContext = getPagerDutyEventContext(event, data);
+    // Responder reply events contain only a partial incident reference. Fetch
+    // the full incident so service routing and the CW incident key are reliable.
+    if (RESPONDER_REPLY_EVENT_TYPES.has(String(eventType || "").toLowerCase())) {
+      incident = await getFullPagerDutyIncident(incident);
+    }
 
-      log(
-        `PagerDuty event ${eventType || "unknown"} ` +
-          `(id=${event.id || "unknown"}, occurred=${event.occurred_at || "unknown"}): ` +
-          `actor=${eventContext.actor} (${eventContext.actorType}), ` +
-          `channel=${eventContext.channel} (${eventContext.channelType})`
-      );
-
-      if (eventType === "incident.escalated") {
-        log(
-          `PagerDuty escalation event received for incident ${
-            incident?.id || "unknown"
-          }`
-        );
-      }
-
-      if (eventType === "incident.acknowledged") {
-        log(
-          `PagerDuty acknowledgment event received for incident ${
-            incident?.id || "unknown"
-          }`
-        );
-      }
-
-      if (
-        RESPONDER_REPLY_EVENT_TYPES.has(
-          String(eventType || "").toLowerCase()
-        )
-      ) {
-        incident = await getFullPagerDutyIncident(incident);
-      }
-
-      if (eventType === "incident.annotated") {
-        const noteText =
-          incident?.event_details?.description ||
-          incident?.summary ||
-          "Annotation added in PagerDuty";
-
-        const ticketId = getTicketIdFromIncident(incident, data);
-
-        if (ticketId) {
-          await addTicketNote(ticketId, noteText, "Detail");
-          log(
-            `Added PagerDuty annotation to ConnectWise Ticket #${ticketId}: ${noteText}`
-          );
-        } else {
-          log("Skipped annotation event — no ticket ID found");
-        }
-
-        return res.status(200).json({ message: "Annotation handled" });
-      }
-
-      const serviceId =
-        incident.service?.id ||
-        data.service?.id ||
-        incident.services?.[0]?.id ||
-        null;
-
-      const serviceName =
-        incident.service?.summary ||
-        data.service?.summary ||
-        incident.services?.[0]?.summary ||
-        "Unknown Service";
-
-      log(`Received event from PagerDuty service: ${serviceName} (${serviceId})`);
-
-      if (!serviceId) {
-        log(
-          `Skipping PagerDuty event "${eventType}" — no service info`
-        );
-
-        return res
-          .status(200)
-          .json({ message: "Event skipped (no service info)" });
-      }
-
-      let secret = null;
-
-      if (
-        serviceId === process.env.PD_SERVICE_TS ||
-        serviceName === "Technical Support"
-      ) {
-        secret = process.env.PD_SECRET_TS;
-      } else if (
-        serviceId === process.env.PD_SERVICE_NOC ||
-        serviceName === "Alerts"
-      ) {
-        secret = process.env.PD_SECRET_NOC;
-      } else if (
-        serviceId === process.env.PD_SERVICE_SOC ||
-        serviceName === "Security Operations Center"
-      ) {
-        secret = process.env.PD_SECRET_SOC;
-      } else {
-        error(`Unknown PagerDuty service: ${serviceName} (${serviceId})`);
-
-        return res
-          .status(200)
-          .json({ message: `Unknown service: ${serviceName}` });
-      }
-
-      if (!verifyPagerDutySignature(req, secret)) {
-        error(`PagerDuty signature verification failed for service: ${serviceName}`);
-
-        return res.status(200).json({ message: "Invalid signature" });
-      }
+    // --- Handle annotation events (notes added in PagerDuty UI) ---
+    if (eventType === "incident.annotated") {
+      const noteText =
+        incident?.event_details?.description ||
+        incident?.summary ||
+        "Annotation added in PagerDuty";
 
       const ticketId = getTicketIdFromIncident(incident, data);
 
-      if (!ticketId) {
-        log("No ConnectWise ticket ID found in incident title");
-
-        return res
-          .status(200)
-          .json({ message: "No ConnectWise ticket ID found" });
+      if (ticketId) {
+        await addTicketNote(ticketId, noteText, "Detail");
+        log(`Added PagerDuty annotation to ConnectWise Ticket #${ticketId}: ${noteText}`);
+      } else {
+        log(`Skipped annotation event — no ticket ID found`);
       }
 
+      return res.status(200).json({ message: "Annotation handled" });
+    }
+
+    // --- Extract service info safely ---
+    const serviceId =
+      incident.service?.id ||
+      data.service?.id ||
+      incident.services?.[0]?.id ||
+      null;
+    const serviceName =
+      incident.service?.summary ||
+      data.service?.summary ||
+      incident.services?.[0]?.summary ||
+      "Unknown Service";
+
+    log(`Received event from PagerDuty service: ${serviceName} (${serviceId})`);
+
+    if (!serviceId) {
+      log(`Skipping PagerDuty event "${eventType}" — no service info (likely annotation or system event)`);
+      return res.status(200).json({ message: "Event skipped (no service info)" });
+    }
+
+    // --- Map service to PD secret ---
+    let secret = null;
+    if (
+      serviceId === process.env.PD_SERVICE_TS ||
+      serviceName === "Technical Support"
+    ) {
+      secret = process.env.PD_SECRET_TS;
+    } else if (
+      serviceId === process.env.PD_SERVICE_NOC ||
+      serviceName === "Alerts"
+    ) {
+      secret = process.env.PD_SECRET_NOC;
+    } else if (
+      serviceId === process.env.PD_SERVICE_SOC ||
+      serviceName === "Security Operations Center"
+    ) {
+      secret = process.env.PD_SECRET_SOC;
+    } else {
+      error(`Unknown PagerDuty service: ${serviceName} (${serviceId})`);
+      return res.status(200).json({ message: `Unknown service: ${serviceName}` });
+    }
+
+    // --- Verify signature ---
+    if (!verifyPagerDutySignature(req, secret)) {
+      error(`PagerDuty signature verification failed for service: ${serviceName}`);
+      return res.status(200).json({ message: "Invalid signature" });
+    }
+
+    // --- Extract ConnectWise Ticket ID ---
+    const ticketId = getTicketIdFromIncident(incident, data);
+    if (!ticketId) {
+      log(`No ConnectWise ticket ID found in incident title`);
+      return res.status(200).json({ message: "No ConnectWise ticket ID found" });
+    }
+
+    log(`Matched PagerDuty incident → ConnectWise Ticket #${ticketId} (Service: ${serviceName})`);
+
+    // The webhook may not include delivery channel details. The incident
+    // timeline is the authoritative place to see mobile app, phone, SMS, or
+    // web actions, so log the recent entries when available.
+    await logRecentPagerDutyChannels(incident.id, eventType);
+
+    // Acknowledge-to-reopen is implemented as resolve-then-trigger because
+    // PagerDuty rejects a direct Acknowledged -> Triggered transition. Ignore
+    // only that temporary resolved webhook; real resolutions still sync to CW.
+    if (eventType === "incident.resolved" && isSyntheticResolution(incident.id)) {
       log(
-        `Matched PagerDuty incident → ConnectWise Ticket #${ticketId} ` +
-          `(Service: ${serviceName})`
+        `Ignored temporary PagerDuty resolution for incident ${incident.id} ` +
+          `during ConnectWise ticket #${ticketId} re-trigger`
       );
+      return res.status(200).json({ message: "Temporary resolution ignored" });
+    }
 
-      await logRecentPagerDutyChannels(incident.id, eventType);
+    // --- Map PagerDuty → CW Status ---
+    let statusUpdate = null;
 
-      if (
-        eventType === "incident.resolved" &&
-        isSyntheticResolution(incident.id)
-      ) {
-        log(
-          `Ignored temporary PagerDuty resolution for incident ${incident.id} ` +
-            `during ConnectWise ticket #${ticketId} re-trigger`
-        );
+    if (eventType === "incident.resolved") {
 
-        return res
-          .status(200)
-          .json({ message: "Temporary resolution ignored" });
+      // Get current CW ticket
+      const cwTicket = await getTicket(ticketId);
+      const cwStatus = (cwTicket.status?.name || "").toLowerCase();
+
+      const isClosedInCW =
+        cwStatus.includes("cancel") ||
+        cwStatus.includes("close") ||
+        cwStatus.includes("complete");
+
+      const isChatAbandoned = cwStatus === "chat abandoned";
+
+      if (isClosedInCW && !isChatAbandoned) {
+        log(`CW ticket #${ticketId} already closed (${cwStatus}) → skipping status update`);
+      } else {
+        statusUpdate = "Returned To Normal";
+        log(`PagerDuty resolved → updating CW ticket #${ticketId} to Returned To Normal`);
       }
 
-      let statusUpdate = null;
-
-      if (eventType === "incident.resolved") {
-        const cwTicket = await getTicket(ticketId);
-        const cwStatus = (cwTicket.status?.name || "").toLowerCase();
-
-        const isClosedInCW =
-          cwStatus.includes("cancel") ||
-          cwStatus.includes("close") ||
-          cwStatus.includes("complete");
-
-        const isChatAbandoned = cwStatus === "chat abandoned";
-
-        if (isClosedInCW && !isChatAbandoned) {
-          log(
-            `CW ticket #${ticketId} already closed (${cwStatus}) ` +
-              "→ skipping status update"
-          );
-        } else {
-          statusUpdate = "Returned To Normal";
-          log(
-            `PagerDuty resolved → updating CW ticket #${ticketId} ` +
-              "to Returned To Normal"
-          );
-        }
-      }
+    }
 
       if (eventType === "incident.acknowledged") {
         statusUpdate = "Acknowledged";
-      }
-
-      if (isAcceptedResponderReply(eventType, data)) {
-        statusUpdate = "Acknowledged";
-
         log(
-          `PagerDuty responder accepted the request for incident ${incident.id} ` +
-            `→ updating ConnectWise Ticket #${ticketId} to Acknowledged`
-        );
-      } else if (
-        RESPONDER_REPLY_EVENT_TYPES.has(
-          String(eventType || "").toLowerCase()
-        )
-      ) {
-        log(
-          `PagerDuty responder reply for incident ${incident.id} ` +
-            `was not an accepted response → leaving ConnectWise Ticket #${ticketId} unchanged`
+          `PagerDuty acknowledged → updating ConnectWise Ticket #${ticketId} ` +
+            "to Acknowledged"
         );
       }
 
-      let priorityUpdate = null;
-      const pdPriorityId = incident.priority?.id;
-
-      const isResponderReplyEvent = RESPONDER_REPLY_EVENT_TYPES.has(
-        String(eventType || "").toLowerCase()
+    if (isAcceptedResponderReply(eventType, data)) {
+      statusUpdate = "Acknowledged";
+      log(
+        `PagerDuty responder accepted the request for incident ${incident.id} ` +
+          `→ updating ConnectWise Ticket #${ticketId} to Acknowledged`
       );
+    } else if (RESPONDER_REPLY_EVENT_TYPES.has(String(eventType || "").toLowerCase())) {
+      log(
+        `PagerDuty responder reply for incident ${incident.id} was not an accepted response ` +
+          `→ leaving ConnectWise Ticket #${ticketId} unchanged`
+      );
+    }
 
-      if (pdPriorityId && !isResponderReplyEvent) {
-        switch (pdPriorityId) {
-          case process.env.PD_PRIORITY_P1:
-            priorityUpdate = "1a - Emergency";
-            break;
-          case process.env.PD_PRIORITY_P2:
-            priorityUpdate = "2a - Critical";
-            break;
-          case process.env.PD_PRIORITY_P3:
-            priorityUpdate = "3 - High";
-            break;
-          case process.env.PD_PRIORITY_P4:
-            priorityUpdate = "4a - Normal";
-            break;
-          case process.env.PD_PRIORITY_P5:
-            priorityUpdate = "10a - Maintenance";
-            break;
-        }
+    // --- Map PD Priority → CW Priority ---
+    let priorityUpdate = null;
+    const pdPriorityId = incident.priority?.id;
+    const isResponderReplyEvent = RESPONDER_REPLY_EVENT_TYPES.has(
+      String(eventType || "").toLowerCase()
+    );
+
+    // A responder reply is not a priority change. Avoid sending a redundant
+    // priority patch back to CW, which can create another Reopened webhook and
+    // repeat the responder request when the reply was not accepted.
+    if (pdPriorityId && !isResponderReplyEvent) {
+      switch (pdPriorityId) {
+        case process.env.PD_PRIORITY_P1:
+          priorityUpdate = "1a - Emergency";
+          break;
+        case process.env.PD_PRIORITY_P2:
+          priorityUpdate = "2a - Critical";
+          break;
+        case process.env.PD_PRIORITY_P3:
+          priorityUpdate = "3 - High";
+          break;
+        case process.env.PD_PRIORITY_P4:
+          priorityUpdate = "4a - Normal";
+          break;
+        case process.env.PD_PRIORITY_P5:
+          priorityUpdate = "10a - Maintenance";
+          break;
       }
+    }
 
-      const updates = [];
+    const updates = [];
 
-      if (statusUpdate) {
-        updates.push({
-          op: "replace",
-          path: "status",
-          value: { name: statusUpdate },
-        });
-      }
-
-      if (priorityUpdate) {
-        const cwPriorityMap = {
-          "1a - Emergency": 6,
-          "2a - Critical": 15,
-          "3 - High": 8,
-          "4a - Normal": 7,
-          "10a - Maintenance": 12,
-        };
-
-        const priorityId = cwPriorityMap[priorityUpdate];
-
-        if (priorityId) {
-          updates.push({
-            op: "replace",
-            path: "priority",
-            value: { id: priorityId, name: priorityUpdate },
-          });
-
-          log(`Updating priority → ${priorityUpdate}`);
-        }
-      }
-
-      if (updates.length > 0) {
-        await updateTicket(ticketId, updates);
-        log(`Updated ConnectWise Ticket #${ticketId}`);
-      }
-
-      if (eventType === "incident.resolved") {
-        let resolutionNote = "Resolved in PagerDuty";
-
-        try {
-          const notesRes = await axios.get(
-            `https://api.pagerduty.com/incidents/${incident.id}/notes`,
-            {
-              headers: {
-                Authorization: `Token token=${process.env.PD_API_KEY}`,
-                Accept: "application/vnd.pagerduty+json;version=2",
-                "Content-Type": "application/json",
-              },
-            }
-          );
-
-          const notes = notesRes.data?.notes || [];
-
-          if (notes.length > 0) {
-            const resolutionEntry = notes.find(note =>
-              note.content?.trim().startsWith("Resolution Note:")
-            );
-
-            if (resolutionEntry) {
-              resolutionNote = resolutionEntry.content
-                .replace(/^Resolution Note:\s*/i, "")
-                .trim();
-
-              log(`Found Resolution Note in PagerDuty: ${resolutionNote}`);
-            } else {
-              const latestNote = notes[notes.length - 1].content?.trim();
-              resolutionNote = latestNote || resolutionNote;
-              log("No Resolution Note found — using latest note instead.");
-            }
-          } else {
-            log("No notes found for PagerDuty incident — using fallback text.");
-          }
-        } catch (err) {
-          log(`Error fetching PagerDuty notes: ${err.message}`);
-        }
-
-        await addTicketNote(ticketId, resolutionNote, "Resolution");
-
-        log(
-          `Added resolution note to ConnectWise Ticket #${ticketId}: ` +
-            resolutionNote
-        );
-      }
-
-      return res
-        .status(200)
-        .json({ message: "PagerDuty v3 webhook processed successfully" });
-    } catch (err) {
-      error("Error handling PagerDuty webhook:", err);
-
-      return res.status(500).json({
-        message: "Internal Server Error",
+    if (statusUpdate) {
+      updates.push({
+        op: "replace",
+        path: "status",
+        value: { name: statusUpdate },
       });
     }
-  }
-);
 
+    if (priorityUpdate) {
+      const cwPriorityMap = {
+        "1a - Emergency": 6,
+        "2a - Critical": 15,
+        "3 - High": 8,
+        "4a - Normal": 7,
+        "10a - Maintenance": 12,
+      };
+
+      const priorityId = cwPriorityMap[priorityUpdate];
+      if (priorityId) {
+        updates.push({
+          op: "replace",
+          path: "priority",
+          value: { id: priorityId, name: priorityUpdate },
+        });
+        log(`🔄 Updating priority → ${priorityUpdate}`);
+      }
+    }
+
+    // --- Apply updates to CW ticket ---
+    if (updates.length > 0) {
+      await updateTicket(ticketId, updates);
+      log(`Updated ConnectWise Ticket #${ticketId}`);
+    }
+
+    // --- Add resolution note if resolved ---
+    if (eventType === "incident.resolved") {
+      let resolutionNote = "Resolved in PagerDuty";
+
+      try {
+        // Fetch latest PagerDuty notes for the incident
+        const notesRes = await axios.get(
+          `https://api.pagerduty.com/incidents/${incident.id}/notes`,
+          {
+            headers: {
+              Authorization: `Token token=${process.env.PD_API_KEY}`,
+              Accept: "application/vnd.pagerduty+json;version=2",
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+        const notes = notesRes.data?.notes || [];
+
+        if (notes.length > 0) {
+          // Find note that starts with "Resolution Note:"
+          const resolutionEntry = notes.find(note =>
+            note.content?.trim().startsWith("Resolution Note:")
+          );
+
+          if (resolutionEntry) {
+            // Clean it up to remove the prefix
+            resolutionNote = resolutionEntry.content
+              .replace(/^Resolution Note:\s*/i, "")
+              .trim();
+            log(`Found Resolution Note in PagerDuty: ${resolutionNote}`);
+          } else {
+            // If no "Resolution Note:" found, use the latest note as fallback
+            const latestNote = notes[notes.length - 1].content?.trim();
+            resolutionNote = latestNote || resolutionNote;
+            log("No 'Resolution Note:' found — using latest note instead.");
+          }
+        } else {
+          log("No notes found for PagerDuty incident — using fallback text.");
+        }
+      } catch (err) {
+        log(`Error fetching PagerDuty notes: ${err.message}`);
+      }
+
+      // Save only one resolution note to ConnectWise
+      await addTicketNote(ticketId, resolutionNote, "Resolution");
+      log(`Added resolution note to ConnectWise Ticket #${ticketId}: ${resolutionNote}`);
+    }
+
+    res.status(200).json({ message: "PagerDuty v3 webhook processed successfully" });
+  } catch (err) {
+    error("Error handling PagerDuty webhook:", err);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+});
+
+// --- Debug route ---
 router.get("/last-event", (req, res) => {
-  if (!lastWebhookEvent) {
+  if (!lastWebhookEvent)
     return res.status(404).json({ message: "No webhook event received yet" });
-  }
-
   res.json(lastWebhookEvent);
 });
 
