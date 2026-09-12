@@ -4,6 +4,7 @@ const crypto = require("crypto");
 const axios = require("axios");
 const router = express.Router();
 const { log, error } = require("../utils/logger");
+const { getIncidentLogEntries } = require("../services/pagerdutyService");
 const { updateTicket, addTicketNote, getTicket } = require("../services/connectwiseService");
 const { isSyntheticResolution } = require("../services/pagerdutyTransitionGuard");
 
@@ -24,6 +25,60 @@ function normalizeWebhookValue(value) {
     .trim()
     .toLowerCase()
     .replace(/[\s_-]+/g, " ");
+}
+
+function getReferenceLabel(reference) {
+  if (!reference) return "unknown";
+  if (typeof reference === "string") return reference;
+  return reference.summary || reference.name || reference.id || reference.type || "unknown";
+}
+
+function getPagerDutyEventContext(event, data) {
+  const actor =
+    event?.agent ||
+    data?.agent ||
+    data?.acted_by ||
+    data?.user ||
+    data?.responder_request?.requester ||
+    null;
+  const channel =
+    event?.channel ||
+    data?.channel ||
+    data?.notification?.channel ||
+    data?.responder_request?.channel ||
+    null;
+
+  return {
+    actor: getReferenceLabel(actor),
+    actorType: actor?.type || "unknown",
+    channel: getReferenceLabel(channel),
+    channelType:
+      (typeof channel === "object" && (channel.type || channel.name)) ||
+      (typeof channel === "string" ? channel : null) ||
+      data?.channel_type ||
+      "not included in webhook",
+  };
+}
+
+async function logRecentPagerDutyChannels(incidentId, eventType) {
+  if (!incidentId) return;
+
+  const entries = await getIncidentLogEntries(incidentId, 10);
+  const recentEntries = entries.slice(0, 5).map(entry => ({
+    type: entry.type || "unknown",
+    channel:
+      entry.channel?.type ||
+      entry.channel?.name ||
+      entry.channel ||
+      "not listed",
+    agent: getReferenceLabel(entry.agent),
+    createdAt: entry.created_at || "unknown",
+  }));
+
+  log(
+    `PagerDuty timeline channels after ${eventType} for incident ${incidentId}`,
+    recentEntries
+  );
 }
 
 // PagerDuty payloads have used response/reply fields in different nested
@@ -144,6 +199,14 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
     const eventType = event.event_type;
     let incident = data.incident || data; // handle both cases
 
+    const eventContext = getPagerDutyEventContext(event, data);
+    log(
+      `📨 PagerDuty event ${eventType || "unknown"} ` +
+        `(id=${event.id || "unknown"}, occurred=${event.occurred_at || "unknown"}): ` +
+        `actor=${eventContext.actor} (${eventContext.actorType}), ` +
+        `channel=${eventContext.channel} (${eventContext.channelType})`
+    );
+
     // Responder reply events contain only a partial incident reference. Fetch
     // the full incident so service routing and the CW incident key are reliable.
     if (RESPONDER_REPLY_EVENT_TYPES.has(String(eventType || "").toLowerCase())) {
@@ -224,6 +287,11 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
     }
 
     log(`Matched PagerDuty incident → ConnectWise Ticket #${ticketId} (Service: ${serviceName})`);
+
+    // The webhook may not include delivery channel details. The incident
+    // timeline is the authoritative place to see mobile app, phone, SMS, or
+    // web actions, so log the recent entries when available.
+    await logRecentPagerDutyChannels(incident.id, eventType);
 
     // Acknowledge-to-reopen is implemented as resolve-then-trigger because
     // PagerDuty rejects a direct Acknowledged -> Triggered transition. Ignore
