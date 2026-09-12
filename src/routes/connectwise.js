@@ -81,6 +81,11 @@ router.post("/webhook", async (req, res) => {
     const normalizedStatus = normalizeStatus(status);
     const previousNormalizedStatus = lastObservedStatus.get(String(ticket.id));
     lastObservedStatus.set(String(ticket.id), normalizedStatus);
+    log(
+      `🧭 CW Ticket #${ticket.id} status transition: ` +
+        `${previousNormalizedStatus || "unknown"} → ${normalizedStatus || "unknown"} ` +
+        `(displayed as "${status || "unknown"}", event=${event || "unknown"})`
+    );
     const isClosedStatus =
       normalizedStatus.includes("cancel") ||
       normalizedStatus.includes("close") ||
@@ -147,12 +152,30 @@ router.post("/webhook", async (req, res) => {
           // PagerDuty does not allow Acknowledged -> Triggered directly.
           // Resolve and immediately re-trigger the same incident instead.
           // Guard the temporary resolved webhook so it cannot change CW to RTN.
-          markSyntheticResolution(existingIncident.id);
+          const guardExpiresAt = markSyntheticResolution(existingIncident.id);
+          log(
+            `🔄 Reopen transition started for CW #${ticket.id}: ` +
+              `PagerDuty ${existingIncident.id} is acknowledged; ` +
+              `temporary resolution guard active until ${new Date(guardExpiresAt).toISOString()}`
+          );
           try {
             await updateIncident(existingIncident.id, "resolved");
+            log(
+              `🔄 Temporary PagerDuty resolution completed for incident ${existingIncident.id}; ` +
+                "re-triggering the same incident"
+            );
             await retriggerIncident(existingIncident);
+            log(
+              `✅ Reopen transition completed for CW #${ticket.id}: ` +
+                `same PagerDuty incident ${existingIncident.id} is triggered`
+            );
           } catch (err) {
             clearSyntheticResolution(existingIncident.id);
+            error(
+              `❌ Reopen transition failed for CW #${ticket.id} / PagerDuty ${existingIncident.id}; ` +
+                "temporary guard cleared",
+              err
+            );
             // Allow a later webhook to retry after a failed PagerDuty call.
             lastObservedStatus.delete(String(ticket.id));
             throw err;
