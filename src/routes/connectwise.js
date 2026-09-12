@@ -86,6 +86,13 @@ router.post("/webhook", async (req, res) => {
         `${previousNormalizedStatus || "unknown"} → ${normalizedStatus || "unknown"} ` +
         `(displayed as "${status || "unknown"}", event=${event || "unknown"})`
     );
+
+    if (normalizedStatus === "esc" || normalizedStatus.includes("escalat")) {
+      log(
+        `🚨 CW Ticket #${ticket.id} has ESC/escalated status ` +
+          `(displayed as "${status}")`
+      );
+    }
     const isClosedStatus =
       normalizedStatus.includes("cancel") ||
       normalizedStatus.includes("close") ||
