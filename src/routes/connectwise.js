@@ -2,6 +2,7 @@
 const express = require("express");
 const router = express.Router();
 const axios = require("axios");
+const crypto = require("crypto");
 const { log, error } = require("../utils/logger");
 const {
   createIncident,
@@ -22,9 +23,11 @@ const PRIVATE_KEY = process.env.CW_PRIVATE_KEY;
 const CLIENT_ID = process.env.CW_CLIENT_ID;
 const allowedBoards = ["Technical Support", "Security Operations Center", "Alerts"];
 const lastObservedStatus = new Map();
-// Temporary process-local guard: allow one PagerDuty re-alert per unresolved
-// ConnectWise reopen lifecycle. Replace with persistent storage for production.
-const reopenRealertGuard = new Map();
+// Temporary process-local dedupe for duplicate deliveries of the same CW event.
+// This is deliberately event-based, so a later genuine Acknowledged -> Re-Opened
+// transition is still allowed. Replace with persistent storage for production.
+const recentWebhookEvents = new Map();
+const WEBHOOK_DEDUPE_TTL_MS = 10 * 60 * 1000;
 
 const authHeader =
   "Basic " + Buffer.from(`${COMPANY}+${PUBLIC_KEY}:${PRIVATE_KEY}`).toString("base64");
@@ -36,8 +39,67 @@ const baseHeaders = {
   clientId: CLIENT_ID,
 };
 
+const normalizeStatus = value =>
+  String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+
+function getWebhookFingerprint(req, ticket, status, event) {
+  const body = req.body || {};
+  const providerEventId =
+    body.webhookId ||
+    body.webhook_id ||
+    body.eventId ||
+    body.event_id ||
+    body.messageId ||
+    body.message_id;
+
+  if (providerEventId) {
+    return `provider-event:${providerEventId}`;
+  }
+
+  const lastUpdated =
+    ticket._info?.lastUpdated ||
+    ticket.lastUpdated ||
+    body.lastUpdated ||
+    body.updatedAt ||
+    body.updated_at;
+
+  if (lastUpdated) {
+    return [
+      `ticket:${ticket.id}`,
+      `status:${normalizeStatus(status)}`,
+      `updated:${lastUpdated}`,
+      `event:${String(event || "").toLowerCase()}`,
+    ].join("|");
+  }
+
+  // Some CW webhook payloads do not include an update timestamp. Hash the
+  // complete payload so an exact retry is still recognized as a duplicate.
+  return `payload:${crypto
+    .createHash("sha256")
+    .update(JSON.stringify(body))
+    .digest("hex")}`;
+}
+
+function claimWebhookEvent(fingerprint) {
+  const now = Date.now();
+
+  for (const [key, claimedAt] of recentWebhookEvents) {
+    if (now - claimedAt >= WEBHOOK_DEDUPE_TTL_MS) {
+      recentWebhookEvents.delete(key);
+    }
+  }
+
+  if (recentWebhookEvents.has(fingerprint)) return false;
+  recentWebhookEvents.set(fingerprint, now);
+  return true;
+}
+
 // ---- CONNECTWISE Webhook Handler -----
 router.post("/webhook", async (req, res) => {
+  let claimedWebhookFingerprint = null;
+
   try {
     log("📩 CW Webhook Received:", JSON.stringify(req.body, null, 2));
 
@@ -65,11 +127,6 @@ router.post("/webhook", async (req, res) => {
     // --- Define Status Mapping ---
     // ConnectWise can format the same status as "Reopened", "Re-Opened",
     // or "Re opened" depending on the source of the update.
-    const normalizeStatus = value =>
-      String(value || "")
-        .toLowerCase()
-        .replace(/[^a-z0-9]/g, "");
-
     const TRIGGER_STATUSES = new Set([
       "new",
       "reopened",
@@ -82,6 +139,17 @@ router.post("/webhook", async (req, res) => {
     ]);
 
     const normalizedStatus = normalizeStatus(status);
+    const webhookFingerprint = getWebhookFingerprint(req, ticket, status, event);
+    if (!claimWebhookEvent(webhookFingerprint)) {
+      log(
+        `⏭️ Duplicate CW webhook ignored for Ticket #${ticket.id} ` +
+          `(status="${status}", event=${event || "unknown"}, ` +
+          `fingerprint=${webhookFingerprint})`
+      );
+      return res.status(200).json({ message: "Duplicate CW webhook ignored", status, ticket });
+    }
+    claimedWebhookFingerprint = webhookFingerprint;
+
     const previousNormalizedStatus = lastObservedStatus.get(String(ticket.id));
     lastObservedStatus.set(String(ticket.id), normalizedStatus);
     log(
@@ -104,14 +172,6 @@ router.post("/webhook", async (req, res) => {
 
     const isChatAbandoned = normalizedStatus === "chatabandoned";
     const isTerminalStatus = isClosedStatus || isChatAbandoned;
-    const ticketKey = String(ticket.id);
-
-    if (isTerminalStatus && reopenRealertGuard.delete(ticketKey)) {
-      log(
-        `🧹 Cleared temporary reopen re-alert guard for CW Ticket #${ticket.id} ` +
-          `after terminal status "${status}"`
-      );
-    }
 
     const incidentKey = `CW-${ticket.id}`;
     let existingIncident = await getIncidentByKey(incidentKey);
@@ -162,80 +222,64 @@ router.post("/webhook", async (req, res) => {
       if (TRIGGER_STATUSES.has(normalizedStatus)) {
         const isReopened = normalizedStatus === "reopened";
 
-        if (isReopened && reopenRealertGuard.has(ticketKey)) {
-          log(
-            `⏭️ Ticket #${ticket.id} has already been re-alerted during this unresolved ` +
-              "lifecycle → skipping duplicate PagerDuty re-trigger"
-          );
-        } else {
-          const claimedReopenGuard = isReopened;
-          if (claimedReopenGuard) {
-            // Claim synchronously before the first await so concurrent CW
-            // webhooks cannot start two re-alert transitions.
-            reopenRealertGuard.set(ticketKey, {
-              incidentId: existingIncident.id,
-              claimedAt: new Date().toISOString(),
-            });
+        try {
+          if (
+            pdStatus === "resolved" &&
+            (!isReopened || previousNormalizedStatus !== "reopened")
+          ) {
+            await retriggerIncident(existingIncident);
+            log(`🔁 Ticket #${ticket.id} ${status} → PagerDuty incident ${existingIncident.id} re-triggered`);
+          } else if (
+            isReopened &&
+            pdStatus === "acknowledged" &&
+            previousNormalizedStatus !== "reopened"
+          ) {
+            // PagerDuty does not allow Acknowledged -> Triggered directly.
+            // Resolve and immediately re-trigger the same incident instead.
+            // Guard the temporary resolved webhook so it cannot change CW to RTN.
+            const guardExpiresAt = markSyntheticResolution(existingIncident.id);
             log(
-              `🔒 Claimed temporary reopen re-alert guard for CW Ticket #${ticket.id}; ` +
-                "one re-alert is allowed until a terminal CW status"
+              `🔄 Reopen transition started for CW #${ticket.id}: ` +
+                `PagerDuty ${existingIncident.id} is acknowledged; ` +
+                `temporary resolution guard active until ${new Date(guardExpiresAt).toISOString()}`
             );
-          }
-
-          try {
-            if (pdStatus === "resolved") {
+            try {
+              await updateIncident(existingIncident.id, "resolved");
+              log(
+                `🔄 Temporary PagerDuty resolution completed for incident ${existingIncident.id}; ` +
+                  "re-triggering the same incident"
+              );
               await retriggerIncident(existingIncident);
-              log(`🔁 Ticket #${ticket.id} Re-Opened → PagerDuty incident ${existingIncident.id} re-triggered`);
-            } else if (
-              isReopened &&
-              pdStatus === "acknowledged" &&
-              previousNormalizedStatus !== "reopened"
-            ) {
-              // PagerDuty does not allow Acknowledged -> Triggered directly.
-              // Resolve and immediately re-trigger the same incident instead.
-              // Guard the temporary resolved webhook so it cannot change CW to RTN.
-              const guardExpiresAt = markSyntheticResolution(existingIncident.id);
               log(
-                `🔄 Reopen transition started for CW #${ticket.id}: ` +
-                  `PagerDuty ${existingIncident.id} is acknowledged; ` +
-                  `temporary resolution guard active until ${new Date(guardExpiresAt).toISOString()}`
+                `✅ Reopen transition completed for CW #${ticket.id}: ` +
+                  `same PagerDuty incident ${existingIncident.id} is triggered`
               );
-              try {
-                await updateIncident(existingIncident.id, "resolved");
-                log(
-                  `🔄 Temporary PagerDuty resolution completed for incident ${existingIncident.id}; ` +
-                    "re-triggering the same incident"
-                );
-                await retriggerIncident(existingIncident);
-                log(
-                  `✅ Reopen transition completed for CW #${ticket.id}: ` +
-                    `same PagerDuty incident ${existingIncident.id} is triggered`
-                );
-              } catch (err) {
-                clearSyntheticResolution(existingIncident.id);
-                error(
-                  `❌ Reopen transition failed for CW #${ticket.id} / PagerDuty ${existingIncident.id}; ` +
-                    "temporary guard cleared",
-                  err
-                );
-                throw err;
-              }
-            } else if (isReopened && pdStatus === "acknowledged") {
-              log(
-                `⏭️ Ticket #${ticket.id} is still Re-Opened → skipping duplicate PagerDuty re-trigger`
+            } catch (err) {
+              clearSyntheticResolution(existingIncident.id);
+              error(
+                `❌ Reopen transition failed for CW #${ticket.id} / PagerDuty ${existingIncident.id}; ` +
+                  "temporary guard cleared",
+                err
               );
-            } else {
-              log(`✅ Ticket #${ticket.id} already active in PagerDuty (status: ${pdStatus})`);
+              throw err;
             }
-          } catch (err) {
-            if (claimedReopenGuard) {
-              reopenRealertGuard.delete(ticketKey);
-              log(`🧹 Cleared temporary reopen re-alert guard for CW Ticket #${ticket.id} after failure`);
-            }
-            // Allow a later webhook to retry after a failed PagerDuty call.
-            lastObservedStatus.delete(ticketKey);
-            throw err;
+          } else if (isReopened && previousNormalizedStatus === "reopened") {
+            log(
+              `⏭️ Ticket #${ticket.id} is still Re-Opened with no intervening CW status ` +
+                "change → skipping duplicate PagerDuty re-trigger"
+            );
+          } else if (isReopened && pdStatus === "acknowledged") {
+            log(
+              `⏭️ Ticket #${ticket.id} Re-Opened event was already handled → ` +
+                "skipping duplicate PagerDuty re-trigger"
+            );
+          } else {
+            log(`✅ Ticket #${ticket.id} already active in PagerDuty (status: ${pdStatus})`);
           }
+        } catch (err) {
+          // Allow a later webhook to retry after a failed PagerDuty call.
+          lastObservedStatus.delete(String(ticket.id));
+          throw err;
         }
       } else if (isTerminalStatus) {
         if (pdStatus !== "resolved") {
@@ -252,6 +296,9 @@ router.post("/webhook", async (req, res) => {
 
     res.status(200).json({ message: "CW Webhook processed", status, ticket });
   } catch (err) {
+    if (claimedWebhookFingerprint) {
+      recentWebhookEvents.delete(claimedWebhookFingerprint);
+    }
     error(" Error processing CW webhook", err);
     res.status(500).json({ message: "Error creating/updating PagerDuty incident", error: err.message });
   }
